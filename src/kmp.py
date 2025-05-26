@@ -33,9 +33,9 @@ def kmp(text: str, pattern: str) -> int:
         if text[i] == pattern[j]:
             i += 1
             j += 1
-            if j == m: # pattern sesuai dengan text
+            if j == m:
                 total += 1
-                j = b[j - 1] # balikin J ke awal pattern
+                j = b[j - 1]
         else:
             if j > 0:
                 j = b[j - 1]
