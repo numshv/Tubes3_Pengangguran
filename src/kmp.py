@@ -7,16 +7,13 @@ def border(pattern: str)->list[int]:
     i = 1
     while i<m:
         if pattern[i] == pattern[j]:
-            # kalo karakter di pattern sesuai, tambahin panjang border
             b[i] = j + 1
             j += 1
             i += 1
         else:
             if j > 0:
-                # kalo karakter di pattern ga sesuai, balikin j ke panjang border sebelumnya
                 j = b[j-1]
             else:
-                # ga ada border yang sesuai
                 b[i] = 0
                 i += 1
     return b
