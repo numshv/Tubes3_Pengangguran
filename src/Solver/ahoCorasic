@@ -1,0 +1,54 @@
+def aho_corasick(s1: str, s2: str) -> list[int]:
+    # masukan s1 jangan list, tapi string input yang dipisahin koma
+    # returnnya adalah array of integer buat jumlah kemunculan tiap kata di s1
+    list1 = [w.strip() for w in s1.split(", ") if w.strip()]
+    trie = [{}]
+    output = [[]]
+    fail = [0]
+
+    def insert(word):
+        node = 0
+        for char in word:
+            if char not in trie[node]:
+                trie.append({})
+                output.append([])
+                fail.append(0)
+                trie[node][char] = len(trie) - 1
+            node = trie[node][char]
+        output[node].append(word)
+
+    for word in list1:
+        insert(word)
+    
+    aho = []
+    for char in trie[0]:
+        child = trie[0][char]
+        aho.append(child)
+        fail[child] = 0
+
+    while aho:
+        current = aho.pop(0)
+        for char, next in trie[current].items():
+            aho.append(next)
+            failNode = fail[current]
+            while failNode != 0 and char not in trie[failNode]:
+                failNode = fail[failNode]
+            fail[next] = trie[failNode].get(char, 0)
+            for word in output[fail[next]]:
+                if word not in output[next]:
+                    output[next].append(word)
+
+    def search(text):
+        result = [0] * len(list1)
+        node = 0
+        for char in text:
+            while node != 0 and char not in trie[node]:
+                node = fail[node]
+            node = trie[node].get(char, 0)
+            for match in output[node]:
+                idx = list1.index(match)
+                result[idx] += 1
+        return result
+    
+    matches = search(s2)
+    return matches
