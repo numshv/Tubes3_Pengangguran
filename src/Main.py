@@ -13,6 +13,8 @@ from Solver.BM import boyer_moore
 from Solver.levenshtein import fuzzy_match
 from Utils.utils import flatten_file_for_pattern_matching, flatten_file_for_regex_multicolumn
 from Utils.ResultStruct import ResultStruct
+from Solver.ahoCorasic import aho_corasick
+from Database.encryption import Cipher
 
 
 class CVATSSearchApp:
@@ -43,8 +45,9 @@ class CVATSSearchApp:
             'host': 'localhost',
             'user': 'root',
             'password': 'n0um1sy1fa',
-            'database': 'ats_pengangguran1'
+            'database': 'ats_pengangguran2'
         }
+        self.secret_key = "RAHASIA"
 
     def setup_database(self):
         print("--- Initializing Database Setup ---")
@@ -99,6 +102,8 @@ class CVATSSearchApp:
         except Exception as e:
             print(f"Gagal membuka file PDF: {e}")
 
+    # Di dalam class CVATSSearchApp:
+
     def perform_search(self, e):
         self.search_stats = {}
         if self.stats_text.current:
@@ -118,11 +123,6 @@ class CVATSSearchApp:
             print("Invalid 'Top choice' input. Defaulting to all results.")
             top_choice = float('inf')
 
-        is_kmp_choice = True if algo_choice == "KMP" else False
-
-        # --- ADJUSTMENT: Centered Loading Bar ---
-        # The ProgressRing is placed inside a Container that expands to fill the entire
-        # GridView area. The alignment property then centers the ring within that container.
         loading_indicator = ft.Container(
             content=ft.ProgressRing(),
             alignment=ft.alignment.center,
@@ -133,15 +133,15 @@ class CVATSSearchApp:
 
         self.search_results = self._search_logic(
             keywords=keywords_text,
-            is_kmp=is_kmp_choice,
+            algo_choice=algo_choice,
             top_choice=top_choice
         )
         
         self.update_results_display()
         print("Search and UI update complete.")
 
-    def _search_logic(self, keywords: str, is_kmp: bool, top_choice: int, max_distance: int = 2):
-        print(f"--- Starting Search (Top {top_choice if top_choice != float('inf') else 'All'}) ---")
+    def _search_logic(self, keywords: str, algo_choice: str, top_choice: int, max_distance: int = 2):
+        print(f"--- Starting Search with {algo_choice} (Top {top_choice if top_choice != float('inf') else 'All'}) ---")
         
         all_applicants = []
         try:
@@ -163,25 +163,52 @@ class CVATSSearchApp:
 
         print("--- Phase 1: Performing Exact Search ---")
         start_time_exact = time.perf_counter()
+
         for applicant in all_applicants:
             cv_path = applicant.get('cv_path')
             if not cv_path: continue
             flat_text = flatten_file_for_pattern_matching(cv_path).lower()
             if "Error:" in flat_text: continue
-            for keyword in keyword_list:
-                exact_matches = kmp(flat_text, keyword) if is_kmp else boyer_moore(flat_text, keyword)
-                if exact_matches > 0:
-                    applicant_id = applicant['applicant_id']
-                    if applicant_id not in final_results_dict:
-                        final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iName=f"{applicant['first_name']} {applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
-                        final_results_dict[applicant_id].cv_path = cv_path
-                        final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-                    final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
-                    final_results_dict[applicant_id].totalMatch += exact_matches
+
+            # --- LOGIKA BARU UNTUK PEMILIHAN ALGORITMA ---
+            
+            # Jika Aho-Corasick, proses semua keyword sekaligus
+            if algo_choice == "Aho-Corasick":
+                # Panggil aho_corasick sekali untuk teks ini dengan semua keyword
+                all_matches = aho_corasick(keywords.lower(), flat_text)
+                
+                # Petakan hasil kembali ke setiap keyword
+                for i, keyword in enumerate(keyword_list):
+                    exact_matches = all_matches[i]
+                    if exact_matches > 0:
+                        applicant_id = applicant['applicant_id']
+                        if applicant_id not in final_results_dict:
+                            final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName =f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+                            final_results_dict[applicant_id].cv_path = cv_path
+                            final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
+                        final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
+                        final_results_dict[applicant_id].totalMatch += exact_matches
+
+            # Jika KMP atau BM, gunakan logika lama (satu per satu)
+            else:
+                for keyword in keyword_list:
+                    exact_matches = kmp(flat_text, keyword) if algo_choice == "KMP" else boyer_moore(flat_text, keyword)
+                    if exact_matches > 0:
+                        applicant_id = applicant['applicant_id']
+                        if applicant_id not in final_results_dict:
+                            final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+                            final_results_dict[applicant_id].cv_path = cv_path
+                            final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
+                        final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
+                        final_results_dict[applicant_id].totalMatch += exact_matches
+
+        # --- AKHIR LOGIKA BARU ---
+
         end_time_exact = time.perf_counter()
         self.search_stats['exact_time'] = (end_time_exact - start_time_exact) * 1000
         self.search_stats['exact_count'] = num_total_applicants
 
+        # ... sisa fungsi (Fuzzy Search & return) tidak perlu diubah ...
         if len(final_results_dict) >= top_choice:
             print("Top choice reached with exact matches. Skipping fuzzy search.")
             self.search_stats['fuzzy_time'] = 0
@@ -210,7 +237,7 @@ class CVATSSearchApp:
                         fuzzy_applicant_total_match += fuzzy_matches
                 
                 if fuzzy_applicant_total_match > 0:
-                    result = ResultStruct(iID=applicant_id, iName=f"{applicant['first_name']} {applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+                    result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
                     result.totalMatch = fuzzy_applicant_total_match
                     result.keywordMatches = fuzzy_applicant_keyword_matches
                     result.cv_path = cv_path
@@ -240,7 +267,7 @@ class CVATSSearchApp:
             bgcolor='#F0EFFF',
             content=ft.Column(
                 controls=[
-                    ft.Text(result.name, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
+                    ft.Text(Cipher.vigenere_decrypt(result.firstName, self.secret_key) + " " + Cipher.vigenere_decrypt(result.lastName, self.secret_key), size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
                     ft.Text(f"{result.totalMatch} total matches", size=12, color=ft.Colors.BLACK54),
                     # --- ADJUSTMENT: Removed margin from text ---
                     # The container wrapping this text was removed. Spacing is handled by the parent Column.
@@ -276,7 +303,7 @@ class CVATSSearchApp:
                     ft.Column(
                         [
                             ft.Text("Algorithm choice:", size=14, weight=ft.FontWeight.BOLD), 
-                            ft.Dropdown(ref=self.algo_dropdown, width=250, options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM")], value="KMP", bgcolor='#FFF9EB', filled=True,fill_color="#FFF9EB"),
+                            ft.Dropdown(ref=self.algo_dropdown, width=250, options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM"), ft.dropdown.Option("Aho-Corasick")], value="KMP", bgcolor='#FFF9EB', filled=True,fill_color="#FFF9EB"),
                             ft.Text("Top choice (optional):", size=14, weight=ft.FontWeight.BOLD), 
                             ft.TextField(ref=self.top_search_input, hint_text="e.g., 5", width=250, border_color=ft.Colors.BLACK, keyboard_type=ft.KeyboardType.NUMBER, bgcolor='#FFF9EB')
                         ],
@@ -457,31 +484,112 @@ class CVATSSearchApp:
                 first_stop_position = stop_match.start()
         return text_after_start[:first_stop_position].strip()
 
+    
     def _parse_structured_section(self, section_text: str) -> list[dict]:
         entries = []
-        raw_entries = re.split(r'\n\s*\n+', section_text.strip())
+        # Split by double newlines or specific job separators
+        raw_entries = re.split(r'\n\s*\n+|\n(?=\d{2}/\d{4}|\w+\s+\d{4})', section_text.strip())
+        
         for entry_text in raw_entries:
             if not entry_text.strip(): continue
             lines = [line.strip() for line in entry_text.strip().split('\n') if line.strip()]
-            if len(lines) > 0:
+            if len(lines) == 0: continue
+            
+            # Try to identify different CV formats
+            entry = self._parse_single_job_entry(lines)
+            if entry:
+                entries.append(entry)
+        
+        return entries
+    
+    def _parse_single_job_entry(self, lines: list[str]) -> dict:
+        """Parse a single job entry handling various CV formats"""
+        if not lines:
+            return None
+            
+        # Pattern 1: Date range at start (e.g., "October 2009 to March 2015")
+        date_first_pattern = r'^((?:\w+\s+)?\d{1,2}/?\d{4}(?:\s*(?:to|-)\s*(?:\w+\s+)?\d{1,2}/?\d{4}|\s*to\s*(?:Current|Present))?)'
+        if re.match(date_first_pattern, lines[0], re.IGNORECASE):
+            period = lines[0]
+            if len(lines) > 1:
+                # Next line usually contains company and title
+                company_title = lines[1]
+                desc_lines = lines[2:] if len(lines) > 2 else []
+                title = company_title
+            else:
+                title = "Position"
+                desc_lines = []
+        
+        # Pattern 2: Title first, then date (e.g., "Customer Service Advocate Jan 2015 to Current")
+        elif len(lines) > 0:
+            first_line = lines[0]
+            # Look for date patterns in the first line
+            date_in_title = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?|\d{1,2}/\d{4}(?:\s*-\s*\d{1,2}/\d{4})?)', first_line, re.IGNORECASE)
+            
+            if date_in_title:
+                period = date_in_title.group(1)
+                title = first_line[:date_in_title.start()].strip() or first_line
+                desc_lines = lines[1:]
+            else:
+                # Pattern 3: Multi-line format - title, company, dates separate
                 title = lines[0]
                 period = "N/A"
-                desc_lines = []
-                period_found = False
-                for i, line in enumerate(lines[1:]):
-                    if re.search(r'\d{4}|present|current|saat ini', line, re.IGNORECASE):
-                        period = line
-                        desc_lines = lines[i+2:]
-                        period_found = True
-                        break
-                if not period_found: desc_lines = lines[1:]
-                desc = '\n'.join(desc_lines).strip() or "No description."
-                entries.append({'title': title, 'period': period, 'desc': desc})
-        return entries
-
+                desc_start_idx = 1
+                
+                # Look for date in subsequent lines
+                for i, line in enumerate(lines[1:], 1):
+                    if re.search(r'\d{4}|present|current', line, re.IGNORECASE):
+                        # Check if this line looks like a date line
+                        if re.search(r'^(?:\w+\s+)?\d{1,2}/?\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE):
+                            period = line
+                            desc_start_idx = i + 1
+                            break
+                        # Or if it contains company info with dates
+                        elif re.search(r'Company|Corp|Inc|LLC|Ltd', line, re.IGNORECASE):
+                            period_match = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?)', line, re.IGNORECASE)
+                            if period_match:
+                                period = period_match.group(1)
+                                desc_start_idx = i + 1
+                                break
+                
+                desc_lines = lines[desc_start_idx:] if desc_start_idx < len(lines) else []
+        
+        # Clean up the description
+        desc = '\n'.join(desc_lines).strip()
+        
+        # Remove common prefixes and clean up
+        desc = re.sub(r'^(Company Name\s*[-–]\s*City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'^(City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
+        
+        if not desc:
+            desc = "No description available."
+        
+        # Clean up title - remove trailing dates or company placeholders
+        title = re.sub(r'\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}.*$', '', title, flags=re.IGNORECASE)
+        title = re.sub(r'\s*Company Name.*$', '', title, flags=re.IGNORECASE)
+        
+        return {
+            'title': title.strip() or "Position",
+            'period': period.strip(),
+            'desc': desc
+        }
+    
     def show_summary_view(self, candidate: ResultStruct):
-        print(f"Generating summary for: {candidate.name}")
+        # print(f"Generating summary for: {candidate.name}")
         self.page.controls.clear()
+
+        try:
+            decrypted_name = Cipher.vigenere_decrypt(candidate.firstName, self.secret_key) + " " + Cipher.vigenere_decrypt(candidate.lastName, self.secret_key)
+            decrypted_address = Cipher.vigenere_decrypt(candidate.address, self.secret_key)
+            decrypted_phone = Cipher.vigenere_decrypt(candidate.phone, self.secret_key)
+            decrypted_dob = Cipher.vigenere_decrypt(candidate.dob, self.secret_key)
+        except Exception as e:
+            print(f"Decryption failed for a field: {e}. Displaying raw data.")
+            decrypted_name = f"{candidate.firstName} (Decryption Failed)"
+            decrypted_address = f"{candidate.address} (Decryption Failed)"
+            decrypted_phone = f"{candidate.phone} (Decryption Failed)"
+            decrypted_dob = f"{candidate.dob} (Decryption Failed)"
+
         SKILLS_HEADERS = ['skills', 'keahlian', 'skill highlights', 'core qualifications', 'highlights']
         JOB_HEADERS = ['experience', 'work experience', 'professional experience', 'job history', 'pengalaman kerja', 'riwayat pekerjaan']
         EDU_HEADERS = ['education', 'education and training', 'pendidikan']
@@ -493,7 +601,7 @@ class CVATSSearchApp:
         job_history_list = self._parse_structured_section(job_text)
         education_list = self._parse_structured_section(edu_text)
         
-        intro_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text(f"Introducing, {candidate.name}!", size=24, weight=ft.FontWeight.BOLD), ft.Text(f"Address: {candidate.address}", size=14), ft.Text(f"Phone: {candidate.phone}", size=14)]))
+        intro_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text(f"Introducing, {decrypted_name}!", size=24, weight=ft.FontWeight.BOLD), ft.Text(f"Address: {decrypted_address}", size=14), ft.Text(f"Phone: {decrypted_phone}", size=14)]))
         
         rank_card = ft.Container(
             padding=20, 
@@ -516,7 +624,7 @@ class CVATSSearchApp:
             height=120,  # Fixed height (same as rank_card)
             content=ft.Column([
                 ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
-                ft.Text(candidate.dob, size=16, weight=ft.FontWeight.BOLD)
+                ft.Text(decrypted_dob, size=16, weight=ft.FontWeight.BOLD)
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
             expand=True
         )

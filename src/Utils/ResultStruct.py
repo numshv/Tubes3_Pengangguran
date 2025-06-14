@@ -1,7 +1,8 @@
 class ResultStruct:
-    def __init__(self, iID, iName, iDOB, iAddress,iPhone):
+    def __init__(self, iID, iFirstName, iLastName, iDOB, iAddress,iPhone):
         self.id = iID
-        self.name = iName
+        self.firstName = iFirstName
+        self.lastName = iLastName
         self.dob = iDOB
         self.address = iAddress
         self.phone = iPhone
