@@ -5,7 +5,7 @@ from mysql.connector import errorcode
 import os
 import webbrowser
 import re
-import time # <-- Ditambahkan untuk timer
+import time
 
 from Database.seeder import run_seeding
 from Solver.kmp import kmp
@@ -20,22 +20,24 @@ class CVATSSearchApp:
         self.page = None
         self.modal_open = False
         
-        self.open_pos = 0.4     
-        self.closed_pos = 0.75  
+        self.open_pos = 0.4
+        self.closed_pos = 0.75
         self.modal_position = self.closed_pos
 
         self.drag_start_y = 0
         self.modal_start_position = 0
 
         self.search_results = []
-        self.search_stats = {} # <-- Untuk menyimpan statistik waktu pencarian
+        self.search_stats = {}
 
-        # Menambahkan referensi untuk SEMUA kontrol input
         self.algo_dropdown = ft.Ref[ft.Dropdown]()
         self.keyword_input = ft.Ref[ft.TextField]()
         self.top_search_input = ft.Ref[ft.TextField]()
         self.results_grid = ft.Ref[ft.GridView]()
-        self.stats_text = ft.Ref[ft.Text]() # <-- Ref untuk teks statistik
+        self.stats_text = ft.Ref[ft.Text]()
+        
+        # This will hold the modal container UI element
+        self.modal_container = ft.Container()
 
         self.db_config = {
             'host': 'localhost',
@@ -44,7 +46,6 @@ class CVATSSearchApp:
             'database': 'ats_pengangguran1'
         }
 
-    # ... (setup_database tidak berubah) ...
     def setup_database(self):
         print("--- Initializing Database Setup ---")
         try:
@@ -60,23 +61,8 @@ class CVATSSearchApp:
             print(f"Database '{db_name}' is ready.")
 
             tables = {
-                "ApplicantProfile": """
-                    CREATE TABLE IF NOT EXISTS `ApplicantProfile` (
-                        `applicant_id` INT PRIMARY KEY NOT NULL,
-                        `first_name` VARCHAR(50) DEFAULT NULL,
-                        `last_name` VARCHAR(50) DEFAULT NULL,
-                        `date_of_birth` DATE DEFAULT NULL,
-                        `address` VARCHAR(255) DEFAULT NULL,
-                        `phone_number` VARCHAR(20) DEFAULT NULL
-                    ) ENGINE=InnoDB;
-                """,
-                "ApplicantDetail": """
-                    CREATE TABLE IF NOT EXISTS `ApplicantDetail` (
-                        `applicant_id` INT PRIMARY KEY NOT NULL AUTO_INCREMENT,
-                        `application_role` VARCHAR(100) DEFAULT NULL,
-                        `cv_path` TEXT
-                    ) ENGINE=InnoDB;
-                """
+                "ApplicantProfile": "CREATE TABLE IF NOT EXISTS `ApplicantProfile` (`applicant_id` INT PRIMARY KEY NOT NULL, `first_name` VARCHAR(50) DEFAULT NULL, `last_name` VARCHAR(50) DEFAULT NULL, `date_of_birth` DATE DEFAULT NULL, `address` VARCHAR(255) DEFAULT NULL, `phone_number` VARCHAR(20) DEFAULT NULL) ENGINE=InnoDB;",
+                "ApplicantDetail": "CREATE TABLE IF NOT EXISTS `ApplicantDetail` (`applicant_id` INT PRIMARY KEY NOT NULL AUTO_INCREMENT, `application_role` VARCHAR(100) DEFAULT NULL, `cv_path` TEXT) ENGINE=InnoDB;"
             }
             for table_name, table_sql in tables.items():
                 try:
@@ -110,12 +96,10 @@ class CVATSSearchApp:
                 print(f"Error: File tidak ditemukan di {abs_path}")
                 return
             webbrowser.open_new_tab(f'file://{abs_path}')
-            print(f"Membuka file: {abs_path}")
         except Exception as e:
             print(f"Gagal membuka file PDF: {e}")
 
     def perform_search(self, e):
-        # Reset statistik sebelum pencarian baru
         self.search_stats = {}
         if self.stats_text.current:
             self.stats_text.current.value = ""
@@ -136,7 +120,15 @@ class CVATSSearchApp:
 
         is_kmp_choice = True if algo_choice == "KMP" else False
 
-        self.results_grid.current.controls = [ft.Row([ft.ProgressRing()], alignment=ft.MainAxisAlignment.CENTER)]
+        # --- ADJUSTMENT: Centered Loading Bar ---
+        # The ProgressRing is placed inside a Container that expands to fill the entire
+        # GridView area. The alignment property then centers the ring within that container.
+        loading_indicator = ft.Container(
+            content=ft.ProgressRing(),
+            alignment=ft.alignment.center,
+            expand=True
+        )
+        self.results_grid.current.controls = [loading_indicator]
         self.page.update()
 
         self.search_results = self._search_logic(
@@ -169,11 +161,9 @@ class CVATSSearchApp:
         keyword_list = [kw.strip().lower() for kw in keywords.split(',') if kw.strip()]
         final_results_dict = {}
 
-        # --- FASE 1: PENCARIAN TEPAT (EXACT MATCHING) ---
         print("--- Phase 1: Performing Exact Search ---")
         start_time_exact = time.perf_counter()
         for applicant in all_applicants:
-            # Logika di sini tetap sama
             cv_path = applicant.get('cv_path')
             if not cv_path: continue
             flat_text = flatten_file_for_pattern_matching(cv_path).lower()
@@ -183,7 +173,7 @@ class CVATSSearchApp:
                 if exact_matches > 0:
                     applicant_id = applicant['applicant_id']
                     if applicant_id not in final_results_dict:
-                        final_results_dict[applicant_id] = ResultStruct(iID=applicant_id,iName=f"{applicant['first_name']} {applicant['last_name']}",iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A",iAddress=applicant['address'],iPhone=applicant['phone_number'])
+                        final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iName=f"{applicant['first_name']} {applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
                         final_results_dict[applicant_id].cv_path = cv_path
                         final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
                     final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
@@ -192,8 +182,6 @@ class CVATSSearchApp:
         self.search_stats['exact_time'] = (end_time_exact - start_time_exact) * 1000
         self.search_stats['exact_count'] = num_total_applicants
 
-        # --- FASE 2: PENCARIAN FUZZY (FUZZY MATCHING) ---
-        # Periksa apakah pencarian fuzzy perlu dijalankan
         if len(final_results_dict) >= top_choice:
             print("Top choice reached with exact matches. Skipping fuzzy search.")
             self.search_stats['fuzzy_time'] = 0
@@ -239,70 +227,93 @@ class CVATSSearchApp:
         return final_results[:top_choice]
 
     def create_result_card(self, result: ResultStruct):
-        keyword_list = [ft.Text(f"- {keyword}: {count}x", size=12, color='black54') for keyword, count in result.keywordMatches.items()]
+        keyword_list = [ft.Text(f"- {keyword}: {count}x", size=12, color=ft.Colors.BLACK54) for keyword, count in result.keywordMatches.items()]
+        
+        # --- ADJUSTMENT: Card Height and Scrolling ---
+        # The container now has a fixed height. The main Column inside it is set to be scrollable.
         return ft.Container(
-            content=ft.Column([
-                ft.Text(result.name, size=16, weight=ft.FontWeight.BOLD, color='black'),
-                ft.Text(f"{result.totalMatch} total matches", size=12, color='black54'),
-                ft.Container(
-                    content=ft.Text("Matched keywords:", size=12, weight=ft.FontWeight.BOLD, color='black'),
-                    margin=ft.margin.only(top=5)
-                ),
-                ft.Column(keyword_list, spacing=2),
-                ft.Container(
-                    content=ft.Row([
-                        ft.FilledButton(
-                            text="Summary",
-                            style=ft.ButtonStyle(bgcolor='#EACD8C', color='black', shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
-                            on_click=lambda _, r=result: self.show_summary_view(r)
-                        ),
-                        ft.FilledButton(
-                            text="Show CV", 
-                            style=ft.ButtonStyle(bgcolor='#EACD8C', color='black', shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
-                            on_click=lambda _, r=result: self.open_pdf_viewer(r.cv_path)
-                        )
-                    ]),
-                    margin=ft.margin.only(top=10) 
-                )
-            ], spacing=4, tight=True),
-            padding=15, border=ft.border.all(1, ft.Colors.BLACK), border_radius=8, bgcolor='#F0EFFF', width=280,
+            height=255, # Smaller, fixed height
+            width=280,
+            padding=15, 
+            border=ft.border.all(1, ft.Colors.BLACK), 
+            border_radius=8, 
+            bgcolor='#F0EFFF',
+            content=ft.Column(
+                controls=[
+                    ft.Text(result.name, size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
+                    ft.Text(f"{result.totalMatch} total matches", size=12, color=ft.Colors.BLACK54),
+                    # --- ADJUSTMENT: Removed margin from text ---
+                    # The container wrapping this text was removed. Spacing is handled by the parent Column.
+                    ft.Text("Matched keywords:", size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
+                    # This column will expand and show a scrollbar if the keyword list is too long
+                    ft.Column(keyword_list, spacing=2, expand=True, scroll=ft.ScrollMode.ADAPTIVE),
+                    # Buttons are pushed to the bottom
+                    ft.Row(
+                        [
+                            ft.FilledButton(
+                                text="Summary",
+                                style=ft.ButtonStyle(bgcolor='#EACD8C', color=ft.Colors.BLACK, shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
+                                on_click=lambda _, r=result: self.show_summary_view(r)
+                            ),
+                            ft.FilledButton(
+                                text="Show CV", 
+                                style=ft.ButtonStyle(bgcolor='#EACD8C', color=ft.Colors.BLACK, shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
+                                on_click=lambda _, r=result: self.open_pdf_viewer(r.cv_path)
+                            )
+                        ]
+                    )
+                ], 
+                spacing=5, # Adjusted spacing
+            ),
         )
 
     def create_search_settings_content(self):
         return ft.Column([
             ft.Text("Search Settings", size=24, weight=ft.FontWeight.BOLD),
-            ft.Row([
-                ft.Column([
-                    ft.Text("Algorithm choice:", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.Dropdown(ref=self.algo_dropdown,width=200, options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM")], value="KMP")
-                ]),
-                ft.Column([
-                    ft.Text("Keywords (comma-separated):", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.TextField(ref=self.keyword_input, hint_text="e.g., python, data science", multiline=True, min_lines=3, width=400, border_color='black')
-                ])
-            ], spacing=50, alignment=ft.MainAxisAlignment.CENTER),
-            ft.Row([
-                ft.Column([
-                    ft.Text("Top choice (optional):", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.TextField(ref=self.top_search_input, hint_text="e.g., 5", width=200, border_color='black', keyboard_type=ft.KeyboardType.NUMBER)
-                ]),
-                ft.ElevatedButton("🔍 Search", bgcolor="#28A745", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)), on_click=self.perform_search)
-            ], spacing=50, alignment=ft.MainAxisAlignment.SPACE_EVENLY, vertical_alignment=ft.CrossAxisAlignment.END)
+            ft.Row(
+                [
+                    # Left Column
+                    ft.Column(
+                        [
+                            ft.Text("Algorithm choice:", size=14, weight=ft.FontWeight.BOLD), 
+                            ft.Dropdown(ref=self.algo_dropdown, width=250, options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM")], value="KMP", bgcolor='#FFF9EB', filled=True,fill_color="#FFF9EB"),
+                            ft.Text("Top choice (optional):", size=14, weight=ft.FontWeight.BOLD), 
+                            ft.TextField(ref=self.top_search_input, hint_text="e.g., 5", width=250, border_color=ft.Colors.BLACK, keyboard_type=ft.KeyboardType.NUMBER, bgcolor='#FFF9EB')
+                        ],
+                        spacing=10
+                    ),
+                    # Right Column
+                    ft.Column(
+                        [
+                            ft.Text("Keywords (comma-separated):", size=14, weight=ft.FontWeight.BOLD), 
+                            ft.TextField(ref=self.keyword_input, hint_text="e.g., python, data science", multiline=True, min_lines=5, border_color=ft.Colors.BLACK, expand=True, bgcolor='#FFF9EB'),
+                            ft.Row(
+                                [
+                                    ft.ElevatedButton("🔍 Search", bgcolor="#28A745", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)), on_click=self.perform_search)
+                                ],
+                                alignment=ft.MainAxisAlignment.END
+                            )
+                        ],
+                        spacing=10,
+                        expand=True
+                    )
+                ],
+                spacing=20,
+                vertical_alignment=ft.CrossAxisAlignment.START
+            )
         ], spacing=20, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
     
     def update_results_display(self):
-        # Update statistik
         stats = self.search_stats
         stat_string = ""
         if stats.get('exact_count', 0) > 0:
-            stat_string += f"Exact Match: {stats['exact_count']} CVs scanned in {stats['exact_time']:.2f}ms."
+            stat_string += f"Exact Match: {stats['exact_count']} CVs in {stats['exact_time']:.2f}ms."
         if stats.get('fuzzy_count', 0) > 0:
-            stat_string += f"\nFuzzy Match: {stats['fuzzy_count']} CVs scanned in {stats['fuzzy_time']:.2f}ms."
+            stat_string += f"\nFuzzy Match: {stats['fuzzy_count']} CVs in {stats['fuzzy_time']:.2f}ms."
 
         if self.stats_text.current:
             self.stats_text.current.value = stat_string
         
-        # Update hasil grid
         if not self.search_results:
             self.results_grid.current.controls = [ft.Row([ft.Text("No matching candidates found.")], alignment=ft.MainAxisAlignment.CENTER)]
         else:
@@ -311,58 +322,59 @@ class CVATSSearchApp:
 
     def show_main_view(self, e=None):
         """
-        Menggambar ulang tampilan utama. Sekarang menyertakan tempat untuk statistik.
+        Builds and displays the main application view.
         """
-        # Tidak perlu self.page.controls.clear() jika kita hanya ingin memperbarui bagian tertentu
-        # Tapi untuk kesederhanaan, kita gambar ulang semua
         self.page.controls.clear()
         
         main_content = ft.Container(
-            content=ft.Column([
-                self.create_header(),
-                ft.Container(
-                    content=ft.Column([
-                        # Baris judul sekarang berisi teks "Results" dan statistik
-                        ft.Row([
-                            ft.Text("Results", size=28, weight=ft.FontWeight.BOLD),
-                            ft.Container(expand=True), # Pendorong ke kanan
-                            ft.Text(
-                                ref=self.stats_text, 
-                                text_align=ft.TextAlign.RIGHT,
-                                color=ft.Colors.BLACK54
-                            )
-                        ]),
-                        ft.GridView(
-                            ref=self.results_grid,
-                            expand=True, runs_count=5, max_extent=300, child_aspect_ratio=0.8,
-                            spacing=20, run_spacing=20,
-                            # Memastikan hasil lama ditampilkan kembali saat navigasi "Back"
-                            controls=[self.create_result_card(result) for result in self.search_results] if self.search_results else [ft.Row([ft.Text("Perform a search to see results.")], alignment=ft.MainAxisAlignment.CENTER)]
-                        )
-                    ]),
-                    padding=20, expand=True
-                )
-            ]),
-            expand=True
-        )
-
-        # Logika modal tetap sama
-        self.modal_container = ft.Container(
-            content=ft.GestureDetector(
-                content=self.create_draggable_modal(),
-                on_pan_start=self.on_pan_start, on_pan_update=self.on_pan_update,
-                on_pan_end=self.on_pan_end, on_tap=self.toggle_modal,
+            content=ft.Column(
+                [
+                    self.create_header(),
+                    ft.Container(
+                        content=ft.Column(
+                            [
+                                ft.Row(
+                                    [
+                                        ft.Text("Results", size=28, weight=ft.FontWeight.BOLD),
+                                        ft.Container(expand=True),
+                                        ft.Text(ref=self.stats_text, text_align=ft.TextAlign.RIGHT, color=ft.Colors.BLACK54)
+                                    ],
+                                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                                ),
+                                ft.GridView(
+                                    ref=self.results_grid,
+                                    expand=True,
+                                    runs_count=5,
+                                    max_extent=300,
+                                    child_aspect_ratio=1.0, # Adjusted for new card height
+                                    spacing=20,
+                                    run_spacing=20,
+                                    controls=[self.create_result_card(result) for result in self.search_results] if self.search_results else [ft.Row([ft.Text("Perform a search to see results.")], alignment=ft.MainAxisAlignment.CENTER)]
+                                )
+                            ],
+                            expand=True
+                        ),
+                        padding=20,
+                        margin=ft.margin.only(top=10),
+                        expand=True
+                    )
+                ],
+                expand=True
             ),
-            width=(self.page.window_width or 1200) * 0.6,
-            height=(self.page.window_height or 900) * 0.65,
-            left=(((self.page.window_width or 1200) * 0.4) / 2)+50,
-            top=(self.page.window_height or 900) * self.modal_position
+            expand=True,
         )
 
+        # Build the modal but don't set its position yet
+        self.modal_container.content = ft.GestureDetector(
+            content=self.create_draggable_modal(),
+            on_pan_start=self.on_pan_start, on_pan_update=self.on_pan_update,
+            on_pan_end=self.on_pan_end, on_tap=self.toggle_modal,
+        )
+        self.modal_container.height=(self.page.window_height or 900) * 0.65
+        
         self.page.add(ft.Stack([main_content, self.modal_container], expand=True))
         self.page.update()
     
-    # ... (Sisa kode tidak berubah) ...
     def main(self, page: ft.Page):
         self.page = page
         page.title = "CV ATS Search"
@@ -373,15 +385,20 @@ class CVATSSearchApp:
         page.on_resize = self.on_page_resize
         self.setup_database()
         self.show_main_view()
-    
+        
+        # --- ADJUSTMENT: Centered Search Modal ---
+        # Call update_modal_position here after the page has been initialized
+        # to ensure the modal is placed correctly from the start.
+        self.update_modal_position(animate=False)
+
     def create_header(self):
-        return ft.Container(content=ft.Row([ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"),ft.Container(expand=True),ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color='black'),ft.Container(expand=True),ft.Text(datetime.now().strftime("%H.%M"), size=20, weight=ft.FontWeight.BOLD, color='black')]),padding=20, bgcolor='#FFF9EB', border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK)))
+        return ft.Container(content=ft.Row([ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"), ft.Container(expand=True), ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK), ft.Container(expand=True), ft.Text(datetime.now().strftime("%H.%M"), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK)]), padding=20, bgcolor='#FFF9EB', border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK)))
 
     def create_draggable_modal(self):
-        return ft.Container(content=ft.Column([self.create_modal_handle(), ft.Container(content=self.create_search_settings_content(), padding=20, expand=True)], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),bgcolor="#eaf4f4", border=ft.border.all(1, ft.Colors.BLACK), border_radius=ft.border_radius.only(top_left=15, top_right=15),)
+        return ft.Container(content=ft.Column([self.create_modal_handle(), ft.Container(content=self.create_search_settings_content(), padding=20, expand=True)], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor="#eaf4f4", border=ft.border.all(1, ft.Colors.BLACK), border_radius=ft.border_radius.only(top_left=15, top_right=15))
 
     def create_modal_handle(self):
-        return ft.Container(content=ft.Container(height=5, width=40, bgcolor='black54', border_radius=3), padding=15, alignment=ft.alignment.center)
+        return ft.Container(content=ft.Container(height=5, width=40, bgcolor=ft.Colors.BLACK54, border_radius=3), padding=15, alignment=ft.alignment.center)
 
     def on_pan_start(self, e: ft.DragStartEvent):
         self.drag_start_y = e.global_y
@@ -407,18 +424,24 @@ class CVATSSearchApp:
         self.update_modal_position(animate=True)
 
     def update_modal_position(self, animate=False):
-        if hasattr(self, 'modal_container') and self.page and self.page.window_height:
-            window_height, window_width = self.page.window_height, self.page.window_width
+        if self.modal_container and self.page and self.page.window_height and self.page.window_width:
+            window_height = self.page.window_height
+            window_width = self.page.window_width
+            
             self.modal_container.animate_position = ft.Animation(300, "decelerate") if animate else None
             self.modal_container.top = window_height * self.modal_position
+            
+            # --- ADJUSTMENT: Centered Search Modal ---
+            # The width and centered left position are now consistently calculated here.
             modal_width = window_width * 0.6
-            self.modal_container.left = (window_width - modal_width) / 2
             self.modal_container.width = modal_width
+            self.modal_container.left = (window_width - modal_width) / 2
+            
             self.page.update()
 
     def on_page_resize(self, e):
-        if hasattr(self, 'modal_container'):
-            self.update_modal_position(animate=False)
+        # When page is resized, recalculate the modal's position and size.
+        self.update_modal_position(animate=False)
 
     def _extract_section_content(self, full_text: str, headers: list[str], all_known_headers: list[str]) -> str:
         stop_headers = [h for h in all_known_headers if h.lower() not in [header.lower() for header in headers]]
@@ -469,14 +492,67 @@ class CVATSSearchApp:
         edu_text = self._extract_section_content(cv_text, EDU_HEADERS, ALL_KNOWN_HEADERS)
         job_history_list = self._parse_structured_section(job_text)
         education_list = self._parse_structured_section(edu_text)
-        intro_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8,content=ft.Column([ft.Text(f"Introducing, {candidate.name}!", size=24, weight=ft.FontWeight.BOLD),ft.Text(f"Address: {candidate.address}", size=14),ft.Text(f"Phone: {candidate.phone}", size=14),]))
-        rank_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#F9E79F",content=ft.Column([ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD),ft.Text(f"of {len(self.search_results)} results", size=16),], horizontal_alignment=ft.CrossAxisAlignment.CENTER))
-        birth_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#A9DFBF",content=ft.Column([ft.Text("Birth Date", size=20, weight=ft.FontWeight.BOLD),ft.Text(candidate.dob, size=24, weight=ft.FontWeight.BOLD),], horizontal_alignment=ft.CrossAxisAlignment.CENTER))
-        skills_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8,content=ft.Column([ft.Text("Skills", size=24, weight=ft.FontWeight.BOLD),ft.Column([ft.Text(skills_text or "No skills section found.", size=16)],expand=True, scroll=ft.ScrollMode.ADAPTIVE)]), expand=True)
-        job_history_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#E8DAEF", expand=True,content=ft.Column([ft.Text("Job History", size=24, weight=ft.FontWeight.BOLD),ft.Column(controls=[ft.Column([ft.Text(f"● {job['title']}", weight=ft.FontWeight.BOLD), ft.Text(job['period'], size=12, italic=True), ft.Text(job['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for job in job_history_list] if job_history_list else [ft.Text("No job history found.")],spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
-        education_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#D4E6F1", expand=True,content=ft.Column([ft.Text("Education", size=24, weight=ft.FontWeight.BOLD),ft.Column(controls=[ft.Column([ft.Text(f"● {edu['title']}", weight=ft.FontWeight.BOLD), ft.Text(edu['period'], size=12, italic=True), ft.Text(edu['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for edu in education_list] if education_list else [ft.Text("No education history found.")],spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
-        back_button = ft.Container(content=ft.Row([ft.Icon(ft.Icons.ARROW_BACK, color='white'), ft.Text("Back to Results", color='white', size=18, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.CENTER),bgcolor='black', padding=15, border_radius=8, on_click=self.show_main_view, tooltip="Go back to results")
-        summary_layout = ft.Column([self.create_header(),ft.Container(padding=20, expand=True,content=ft.Row([ft.Column([intro_card, ft.Row([rank_card, birth_card], spacing=20), skills_card], spacing=20, expand=2),ft.Column([job_history_card], spacing=20, expand=3),ft.Column([education_card, back_button], spacing=20, expand=3),], spacing=20, expand=True))], expand=True, alignment=ft.MainAxisAlignment.START)
+        
+        intro_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text(f"Introducing, {candidate.name}!", size=24, weight=ft.FontWeight.BOLD), ft.Text(f"Address: {candidate.address}", size=14), ft.Text(f"Phone: {candidate.phone}", size=14)]))
+        
+        rank_card = ft.Container(
+            padding=20, 
+            border=ft.border.all(2, ft.Colors.OUTLINE), 
+            border_radius=8, 
+            bgcolor="#F9E79F", 
+            height=120,  # Fixed height
+            content=ft.Column([
+                ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
+                ft.Text(f"of {len(self.search_results)} results", size=16)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            expand=True
+        )
+
+        birth_card = ft.Container(
+            padding=20, 
+            border=ft.border.all(2, ft.Colors.OUTLINE), 
+            border_radius=8, 
+            bgcolor="#A9DFBF", 
+            height=120,  # Fixed height (same as rank_card)
+            content=ft.Column([
+                ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
+                ft.Text(candidate.dob, size=16, weight=ft.FontWeight.BOLD)
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            expand=True
+        )
+        
+        skills_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text("Skills", size=24, weight=ft.FontWeight.BOLD), ft.Column([ft.Text(skills_text or "No skills section found.", size=16)], expand=True, scroll=ft.ScrollMode.ADAPTIVE)]), expand=True)
+        job_history_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#E8DAEF", expand=True, content=ft.Column([ft.Text("Job History", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {job['title']}", weight=ft.FontWeight.BOLD), ft.Text(job['period'], size=12, italic=True), ft.Text(job['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for job in job_history_list] if job_history_list else [ft.Text("No job history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        education_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#D4E6F1", expand=True, content=ft.Column([ft.Text("Education", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {edu['title']}", weight=ft.FontWeight.BOLD), ft.Text(edu['period'], size=12, italic=True), ft.Text(edu['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for edu in education_list] if education_list else [ft.Text("No education history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        back_button = ft.Container(content=ft.Row([ft.Icon(ft.Icons.ARROW_BACK, color='white'), ft.Text("Back to Results", color='white', size=18, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.CENTER), bgcolor='black', padding=15, border_radius=8, on_click=self.show_main_view, tooltip="Go back to results")
+        
+        summary_layout = ft.Column([
+            self.create_header(), 
+            ft.Container(
+                padding=20, 
+                expand=True, 
+                content=ft.Row(
+                    [
+                        ft.Column(
+                            [
+                                intro_card, 
+                                ft.Row([rank_card, birth_card], spacing=20), 
+                                skills_card
+                            ], 
+                            spacing=20, 
+                            expand=2
+                        ), 
+                        ft.Column([job_history_card], spacing=20, expand=3), 
+                        ft.Column([education_card, back_button], spacing=20, expand=3)
+                    ], 
+                    spacing=20, 
+                    expand=True
+                )
+            )
+        ], 
+        expand=True, 
+        alignment=ft.MainAxisAlignment.START
+    )
         self.page.add(summary_layout)
         self.page.update()
 
