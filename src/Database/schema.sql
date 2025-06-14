@@ -1,4 +1,4 @@
-CREATE DATABASE IF NOT EXISTS ats_pengangguran;
+CREATE DATABASE IF NOT EXISTS ats_pengangguran1;
 USE ats_pengangguran;
 
 CREATE TABLE IF NOT EXISTS ApplicantProfile (
@@ -14,5 +14,4 @@ CREATE TABLE ApplicantDetail(
     applicant_id PRIMARY KEY NOT NULL AUTO_INCREMENT,
     application_role_varchar(100) DEFAULT NULL,
     cv_path TEXT
-
 )

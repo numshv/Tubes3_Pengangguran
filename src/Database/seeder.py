@@ -93,6 +93,6 @@ if __name__ == "__main__":
         'host': 'localhost',
         'user': 'root',
         'password': '',
-        'database': 'ats_pengangguran'
+        'database': 'ats_pengangguran1'
     }
     run_seeding(DB_CONFIG_TEST)
