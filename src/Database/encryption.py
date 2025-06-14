@@ -100,29 +100,3 @@ class Cipher:
             raise ValueError("Kunci Vigenère harus hanya berisi huruf.")
         return Cipher._vigenere_process(ciphertext, key, 'decrypt')
 
-# Contoh Penggunaan
-if __name__ == "__main__":
-    # --- Contoh Caesar Cipher ---
-    original_text_caesar = "Hello, World! 123"
-    shift_key = 5
-    encrypted_caesar = Cipher.caesar_encrypt(original_text_caesar, shift_key)
-    decrypted_caesar = Cipher.caesar_decrypt(encrypted_caesar, shift_key)
-
-    print("--- Caesar Cipher Example ---")
-    print(f"Original:    {original_text_caesar}")
-    print(f"Encrypted:   {encrypted_caesar}")
-    print(f"Decrypted:   {decrypted_caesar}")
-    print("-" * 20)
-
-    # --- Contoh Vigenère Cipher ---
-    original_text_vigenere = "This is a secret message."
-    vigenere_key = "kunci"
-    encrypted_vigenere = Cipher.vigenere_encrypt(original_text_vigenere, vigenere_key)
-    decrypted_vigenere = Cipher.vigenere_decrypt(encrypted_vigenere, vigenere_key)
-    
-    print("--- Vigenère Cipher Example ---")
-    print(f"Original:    {original_text_vigenere}")
-    print(f"Key:         {vigenere_key}")
-    print(f"Encrypted:   {encrypted_vigenere}")
-    print(f"Decrypted:   {decrypted_vigenere}")
-    print("-" * 20)
