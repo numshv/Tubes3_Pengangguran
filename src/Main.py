@@ -1,7 +1,6 @@
 import flet as ft
 from datetime import datetime
 import mysql.connector
-from pathlib import Path
 from Database.seeder import run_seeding
 from mysql.connector import errorcode
 
@@ -10,15 +9,13 @@ class CVATSSearchApp:
         self.page = None
         self.modal_open = False
         
-        # Modal positions for peeking and opening
-        self.open_pos = 0.4      # Top of modal is 40% down from the top of the screen
-        self.closed_pos = 0.75   # Top of modal is 75% down (more peeking)
+        self.open_pos = 0.4     
+        self.closed_pos = 0.75  
         self.modal_position = self.closed_pos
 
         self.drag_start_y = 0
         self.modal_start_position = 0
         
-        # Expanded dummy data for the summary view
         self.search_results = [
             {
                 'id': 0, 'name': 'Qodri', 'matches': 4, 'rank': 1, 'total_candidates': 99,
@@ -55,21 +52,17 @@ class CVATSSearchApp:
         """Ensures the database and tables exist, and seeds if necessary."""
         print("--- Initializing Database Setup ---")
         try:
-            # Connect to MySQL server without specifying a database
             db_server_config = self.db_config.copy()
             db_server_config.pop('database', None)
             
             connection = mysql.connector.connect(**db_server_config)
             cursor = connection.cursor()
             
-            # Create database if it doesn't exist
             db_name = self.db_config['database']
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             cursor.execute(f"USE {db_name}")
             print(f"Database '{db_name}' is ready.")
 
-            # Create tables from schema (corrected SQL)
-            # Note: A real app would read this from schema.sql
             tables = {
                 "ApplicantProfile": """
                     CREATE TABLE IF NOT EXISTS `ApplicantProfile` (
@@ -96,7 +89,6 @@ class CVATSSearchApp:
                 except mysql.connector.Error as err:
                     print(f"Failed creating table: {err}")
 
-            # Check if the database is empty
             cursor.execute("SELECT COUNT(*) FROM ApplicantProfile")
             if cursor.fetchone()[0] == 0:
                 print("Database is empty. Running seeder...")
@@ -123,17 +115,6 @@ class CVATSSearchApp:
             connection = mysql.connector.connect(**self.db_config)
             cursor = connection.cursor(dictionary=True)
             
-            # --- PERUBAHAN DI SINI ---
-            # Query asli Anda mengambil semua data.
-            # query = """
-            #     SELECT 
-            #         p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number,
-            #         d.application_role
-            #     FROM ApplicantProfile p
-            #     JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id
-            # """
-            
-            # Query yang dimodifikasi untuk mengambil hanya SATU baris data
             debug_query = """
                 SELECT 
                     p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number,
@@ -145,27 +126,20 @@ class CVATSSearchApp:
             
             cursor.execute(debug_query)
             
-            # Menggunakan fetchone() untuk mendapatkan satu baris saja
             first_record = cursor.fetchone() 
 
-            # --- Cetak data untuk debugging ---
             if first_record:
-                print("\n✅  Successfully fetched the first record for debugging:")
+                print("\n  Successfully fetched the first record for debugging:")
                 print(first_record)
                 print("\n")
             else:
-                print("\n⚠️  No records found in the database.\n")
+                print("\n  No records found in the database.\n")
 
-            # Untuk sekarang, kita akan menghentikan pemrosesan lebih lanjut
-            # dan menggunakan data dummy agar aplikasi tetap berjalan.
-            # Ganti self.search_results dengan data yang Anda muat jika Anda ingin menampilkannya di UI.
-            # self.search_results = [ formatted_data ] # Anda bisa memformat `first_record` di sini jika mau
             
             print("Debug data displayed. App will continue with existing dummy data.")
 
         except mysql.connector.Error as err:
             print(f"Failed to load data from DB: {err}")
-            # Fallback ke data yang ada jika terjadi kesalahan
         finally:
             if 'connection' in locals() and connection.is_connected():
                 connection.close()
@@ -208,8 +182,6 @@ class CVATSSearchApp:
             ], spacing=8, tight=True),
             padding=15, border=ft.border.all(2, 'black'), border_radius=8, bgcolor='#F0EFFF', width=280
         )
-
-    # --- MODAL LOGIC ---
 
     def create_modal_handle(self):
         return ft.Container(content=ft.Container(height=5, width=40, bgcolor='black54', border_radius=3), padding=15, alignment=ft.alignment.center)
@@ -276,8 +248,6 @@ class CVATSSearchApp:
     def perform_search(self, e):
         print("Search performed!")
 
-    # --- MANUAL VIEW NAVIGATION LOGIC ---
-
     def show_main_view(self, e=None):
         """Clears the page and draws the main search view with its modal."""
         self.page.controls.clear()
@@ -305,7 +275,6 @@ class CVATSSearchApp:
         
         modal_width = window_width * 0.6
         
-        # --- REDUCED MODAL HEIGHT ---
         modal_height = window_height * 0.65  # Reduced from 0.7 or 0.8
         
         self.modal_container = ft.Container(
@@ -404,7 +373,6 @@ class CVATSSearchApp:
         self.setup_database()
         self.load_data_from_db()
         
-        # Start by showing the main view, which includes the peeking modal
         self.show_main_view()
 
 def main(page: ft.Page):
