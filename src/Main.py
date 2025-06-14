@@ -1,5 +1,9 @@
 import flet as ft
 from datetime import datetime
+import mysql.connector
+from pathlib import Path
+from Database.seeder import run_seeding
+from mysql.connector import errorcode
 
 class CVATSSearchApp:
     def __init__(self):
@@ -15,7 +19,7 @@ class CVATSSearchApp:
         self.modal_start_position = 0
         
         # Expanded dummy data for the summary view
-        self.sample_results = [
+        self.search_results = [
             {
                 'id': 0, 'name': 'Qodri', 'matches': 4, 'rank': 1, 'total_candidates': 99,
                 'address': 'Jl. hahahahah No.69', 'phone': '+6299999999999',
@@ -33,13 +37,138 @@ class CVATSSearchApp:
             }
         ]
         for i in range(1, 8):
-            new_candidate = self.sample_results[0].copy()
+            new_candidate = self.search_results[0].copy()
             new_candidate['id'] = i
             new_candidate['name'] = f'Candidate {i+1}'
             new_candidate['rank'] = i + 1
-            self.sample_results.append(new_candidate)
+            self.search_results.append(new_candidate)
 
-    # --- UI BUILDERS ---
+
+        self.db_config = {
+            'host': 'localhost',
+            'user': 'root',  # Change as needed
+            'password': 'n0um1sy1fa',  # Change as needed
+            'database': 'ats_pengangguran'
+        }
+
+    def setup_database(self):
+        """Ensures the database and tables exist, and seeds if necessary."""
+        print("--- Initializing Database Setup ---")
+        try:
+            # Connect to MySQL server without specifying a database
+            db_server_config = self.db_config.copy()
+            db_server_config.pop('database', None)
+            
+            connection = mysql.connector.connect(**db_server_config)
+            cursor = connection.cursor()
+            
+            # Create database if it doesn't exist
+            db_name = self.db_config['database']
+            cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+            cursor.execute(f"USE {db_name}")
+            print(f"Database '{db_name}' is ready.")
+
+            # Create tables from schema (corrected SQL)
+            # Note: A real app would read this from schema.sql
+            tables = {
+                "ApplicantProfile": """
+                    CREATE TABLE IF NOT EXISTS `ApplicantProfile` (
+                        `applicant_id` INT PRIMARY KEY NOT NULL,
+                        `first_name` VARCHAR(50) DEFAULT NULL,
+                        `last_name` VARCHAR(50) DEFAULT NULL,
+                        `date_of_birth` DATE DEFAULT NULL,
+                        `address` VARCHAR(255) DEFAULT NULL,
+                        `phone_number` VARCHAR(20) DEFAULT NULL
+                    ) ENGINE=InnoDB;
+                """,
+                "ApplicantDetail": """
+                    CREATE TABLE IF NOT EXISTS `ApplicantDetail` (
+                        `applicant_id` INT PRIMARY KEY NOT NULL AUTO_INCREMENT,
+                        `application_role` VARCHAR(100) DEFAULT NULL,
+                        `cv_path` TEXT
+                    ) ENGINE=InnoDB;
+                """
+            }
+            for table_name, table_sql in tables.items():
+                try:
+                    print(f"Creating table '{table_name}'...")
+                    cursor.execute(table_sql)
+                except mysql.connector.Error as err:
+                    print(f"Failed creating table: {err}")
+
+            # Check if the database is empty
+            cursor.execute("SELECT COUNT(*) FROM ApplicantProfile")
+            if cursor.fetchone()[0] == 0:
+                print("Database is empty. Running seeder...")
+                connection.close() # Close connection before seeder opens its own
+                run_seeding(self.db_config)
+            else:
+                print("Database already contains data. Skipping seeder.")
+            
+            if connection.is_connected():
+                connection.close()
+
+        except mysql.connector.Error as err:
+            if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
+                print("Something is wrong with your user name or password")
+            else:
+                print(f"Database setup failed: {err}")
+            return False
+        return True
+
+    def load_data_from_db(self):
+        """Loads and formats applicant data from the database."""
+        print("--- Loading data from database (DEBUG MODE: Fetching only the first record) ---")
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor(dictionary=True)
+            
+            # --- PERUBAHAN DI SINI ---
+            # Query asli Anda mengambil semua data.
+            # query = """
+            #     SELECT 
+            #         p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number,
+            #         d.application_role
+            #     FROM ApplicantProfile p
+            #     JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id
+            # """
+            
+            # Query yang dimodifikasi untuk mengambil hanya SATU baris data
+            debug_query = """
+                SELECT 
+                    p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number,
+                    d.application_role, d.cv_path
+                FROM ApplicantProfile p
+                JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id
+                LIMIT 1
+            """
+            
+            cursor.execute(debug_query)
+            
+            # Menggunakan fetchone() untuk mendapatkan satu baris saja
+            first_record = cursor.fetchone() 
+
+            # --- Cetak data untuk debugging ---
+            if first_record:
+                print("\n✅  Successfully fetched the first record for debugging:")
+                print(first_record)
+                print("\n")
+            else:
+                print("\n⚠️  No records found in the database.\n")
+
+            # Untuk sekarang, kita akan menghentikan pemrosesan lebih lanjut
+            # dan menggunakan data dummy agar aplikasi tetap berjalan.
+            # Ganti self.search_results dengan data yang Anda muat jika Anda ingin menampilkannya di UI.
+            # self.search_results = [ formatted_data ] # Anda bisa memformat `first_record` di sini jika mau
+            
+            print("Debug data displayed. App will continue with existing dummy data.")
+
+        except mysql.connector.Error as err:
+            print(f"Failed to load data from DB: {err}")
+            # Fallback ke data yang ada jika terjadi kesalahan
+        finally:
+            if 'connection' in locals() and connection.is_connected():
+                connection.close()
 
     def create_header(self):
         return ft.Container(
@@ -162,7 +291,7 @@ class CVATSSearchApp:
                         ft.GridView(
                             expand=True, runs_count=4, max_extent=300, child_aspect_ratio=1.0,
                             spacing=20, run_spacing=20,
-                            controls=[self.create_result_card(result) for result in self.sample_results]
+                            controls=[self.create_result_card(result) for result in self.search_results]
                         )
                     ]),
                     padding=20, expand=True
@@ -272,6 +401,8 @@ class CVATSSearchApp:
         page.window_width = 1400
         page.window_height = 900
         page.on_resize = self.on_page_resize
+        self.setup_database()
+        self.load_data_from_db()
         
         # Start by showing the main view, which includes the peeking modal
         self.show_main_view()
