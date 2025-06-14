@@ -14,23 +14,25 @@ def boyer_moore(text: str, pattern: str) -> int:
     if m == 0 or n == 0 or m > n:
         return 0
     
-    bad_char_table = bad_char(pattern)
+    bad_char_table = bad_char(pattern) 
 
     s = 0   
     while s <= (n - m):
-        j = m - 1  
+        j = m - 1   
         while j >= 0 and pattern[j] == text[s + j]:
             j -= 1
+
         if j < 0:
             total += 1
             if s + m < n:
-                shift = m - bad_char_table[ord(text[s + m])]
+                mismatched_char_after_match = text[s + m]
+                shift = m - bad_char_table.get(mismatched_char_after_match, -1)
                 s += shift
             else:
-                s += 1 
-
+                s += 1
         else:
-            shift = j - bad_char_table[ord(text[s + j])]
-            s += max(1, shift) # minimal geser sekali
+            mismatched_char = text[s + j]
+            shift = j - bad_char_table.get(mismatched_char, -1)
+            s += max(1, shift)
+            
     return total
-

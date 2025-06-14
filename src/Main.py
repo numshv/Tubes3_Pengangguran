@@ -2,10 +2,10 @@ import flet as ft
 from datetime import datetime
 import mysql.connector
 from mysql.connector import errorcode
-
-# --- TAMBAHAN 1: Impor library untuk membuka file ---
 import os
 import webbrowser
+import re
+import time # <-- Ditambahkan untuk timer
 
 from Database.seeder import run_seeding
 from Solver.kmp import kmp
@@ -28,11 +28,14 @@ class CVATSSearchApp:
         self.modal_start_position = 0
 
         self.search_results = []
+        self.search_stats = {} # <-- Untuk menyimpan statistik waktu pencarian
 
+        # Menambahkan referensi untuk SEMUA kontrol input
         self.algo_dropdown = ft.Ref[ft.Dropdown]()
         self.keyword_input = ft.Ref[ft.TextField]()
         self.top_search_input = ft.Ref[ft.TextField]()
         self.results_grid = ft.Ref[ft.GridView]()
+        self.stats_text = ft.Ref[ft.Text]() # <-- Ref untuk teks statistik
 
         self.db_config = {
             'host': 'localhost',
@@ -41,7 +44,7 @@ class CVATSSearchApp:
             'database': 'ats_pengangguran1'
         }
 
-    # ... (setup_database tetap sama) ...
+    # ... (setup_database tidak berubah) ...
     def setup_database(self):
         print("--- Initializing Database Setup ---")
         try:
@@ -78,7 +81,6 @@ class CVATSSearchApp:
             for table_name, table_sql in tables.items():
                 try:
                     cursor.execute(table_sql)
-
                 except mysql.connector.Error as err:
                     print(f"Failed creating table: {err}")
 
@@ -101,25 +103,23 @@ class CVATSSearchApp:
             return False
         return True
     
-    # --- TAMBAHAN 2: Fungsi untuk membuka file PDF ---
     def open_pdf_viewer(self, cv_path: str):
-        """Membuka file PDF menggunakan aplikasi default sistem."""
         try:
-            # Menggunakan realpath untuk mendapatkan path absolut yang kanonis
             abs_path = os.path.realpath(cv_path)
             if not os.path.exists(abs_path):
                 print(f"Error: File tidak ditemukan di {abs_path}")
-                # Anda bisa menampilkan dialog error di sini
                 return
-                
-            # webbrowser lebih portabel untuk Windows, Mac, dan Linux
             webbrowser.open_new_tab(f'file://{abs_path}')
             print(f"Membuka file: {abs_path}")
         except Exception as e:
             print(f"Gagal membuka file PDF: {e}")
 
-
     def perform_search(self, e):
+        # Reset statistik sebelum pencarian baru
+        self.search_stats = {}
+        if self.stats_text.current:
+            self.stats_text.current.value = ""
+
         algo_choice = self.algo_dropdown.current.value
         keywords_text = self.keyword_input.current.value
         top_search_text = self.top_search_input.current.value
@@ -148,17 +148,9 @@ class CVATSSearchApp:
         self.update_results_display()
         print("Search and UI update complete.")
 
-    # Ganti fungsi _search_logic Anda dengan yang ini
-
     def _search_logic(self, keywords: str, is_kmp: bool, top_choice: int, max_distance: int = 2):
-        """
-        Logika pencarian inti dengan aturan baru:
-        1. Cari semua kecocokan TEPAT terlebih dahulu.
-        2. Cari kecocokan FUZZY hanya untuk pelamar yang TIDAK ditemukan pada tahap 1.
-        """
-        print(f"--- Starting Search with New Logic (Top {top_choice if top_choice != float('inf') else 'All'}) ---")
+        print(f"--- Starting Search (Top {top_choice if top_choice != float('inf') else 'All'}) ---")
         
-        # Dapatkan semua data pelamar dari database
         all_applicants = []
         try:
             connection = mysql.connector.connect(**self.db_config)
@@ -166,6 +158,7 @@ class CVATSSearchApp:
             query = "SELECT p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number, d.application_role, d.cv_path FROM ApplicantProfile p JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id"
             cursor.execute(query)
             all_applicants = cursor.fetchall()
+            num_total_applicants = len(all_applicants)
         except mysql.connector.Error as err:
             print(f"Failed to fetch applicants from DB: {err}")
             return []
@@ -174,86 +167,71 @@ class CVATSSearchApp:
                 connection.close()
 
         keyword_list = [kw.strip().lower() for kw in keywords.split(',') if kw.strip()]
-        
-        # Gunakan dictionary untuk menyimpan hasil agar mudah diakses berdasarkan ID
         final_results_dict = {}
 
         # --- FASE 1: PENCARIAN TEPAT (EXACT MATCHING) ---
         print("--- Phase 1: Performing Exact Search ---")
+        start_time_exact = time.perf_counter()
         for applicant in all_applicants:
+            # Logika di sini tetap sama
             cv_path = applicant.get('cv_path')
             if not cv_path: continue
-
             flat_text = flatten_file_for_pattern_matching(cv_path).lower()
             if "Error:" in flat_text: continue
-
             for keyword in keyword_list:
                 exact_matches = kmp(flat_text, keyword) if is_kmp else boyer_moore(flat_text, keyword)
-                
                 if exact_matches > 0:
                     applicant_id = applicant['applicant_id']
-                    
-                    # Jika pelamar ini belum ada di hasil, buat struct baru
                     if applicant_id not in final_results_dict:
-                        final_results_dict[applicant_id] = ResultStruct(
-                            iID=applicant_id,
-                            iName=f"{applicant['first_name']} {applicant['last_name']}",
-                            iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A",
-                            iAddress=applicant['address'],
-                            iPhone=applicant['phone_number']
-                        )
+                        final_results_dict[applicant_id] = ResultStruct(iID=applicant_id,iName=f"{applicant['first_name']} {applicant['last_name']}",iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A",iAddress=applicant['address'],iPhone=applicant['phone_number'])
                         final_results_dict[applicant_id].cv_path = cv_path
                         final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-
-                    # Tambahkan skor kecocokan
                     final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
                     final_results_dict[applicant_id].totalMatch += exact_matches
+        end_time_exact = time.perf_counter()
+        self.search_stats['exact_time'] = (end_time_exact - start_time_exact) * 1000
+        self.search_stats['exact_count'] = num_total_applicants
 
         # --- FASE 2: PENCARIAN FUZZY (FUZZY MATCHING) ---
-        print("--- Phase 2: Performing Fuzzy Search on remaining candidates ---")
-        for applicant in all_applicants:
-            # Hentikan jika hasil sudah memenuhi kuota top_choice
-            if len(final_results_dict) >= top_choice:
-                break
+        # Periksa apakah pencarian fuzzy perlu dijalankan
+        if len(final_results_dict) >= top_choice:
+            print("Top choice reached with exact matches. Skipping fuzzy search.")
+            self.search_stats['fuzzy_time'] = 0
+            self.search_stats['fuzzy_count'] = 0
+        else:
+            print("--- Phase 2: Performing Fuzzy Search on remaining candidates ---")
+            fuzzy_scanned_count = 0
+            start_time_fuzzy = time.perf_counter()
+            for applicant in all_applicants:
+                if len(final_results_dict) >= top_choice: break
+                applicant_id = applicant['applicant_id']
+                if applicant_id in final_results_dict: continue
                 
-            applicant_id = applicant['applicant_id']
-            
-            # LEWATI pelamar ini jika sudah ditemukan di FASE 1
-            if applicant_id in final_results_dict:
-                continue
+                fuzzy_scanned_count += 1
+                cv_path = applicant.get('cv_path')
+                if not cv_path: continue
+                flat_text = flatten_file_for_pattern_matching(cv_path).lower()
+                if "Error:" in flat_text: continue
 
-            cv_path = applicant.get('cv_path')
-            if not cv_path: continue
+                fuzzy_applicant_total_match = 0
+                fuzzy_applicant_keyword_matches = {}
+                for keyword in keyword_list:
+                    fuzzy_matches = fuzzy_match(flat_text, keyword, max_distance)
+                    if fuzzy_matches > 0:
+                        fuzzy_applicant_keyword_matches[keyword] = fuzzy_matches
+                        fuzzy_applicant_total_match += fuzzy_matches
+                
+                if fuzzy_applicant_total_match > 0:
+                    result = ResultStruct(iID=applicant_id, iName=f"{applicant['first_name']} {applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+                    result.totalMatch = fuzzy_applicant_total_match
+                    result.keywordMatches = fuzzy_applicant_keyword_matches
+                    result.cv_path = cv_path
+                    result.stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
+                    final_results_dict[applicant_id] = result
+            end_time_fuzzy = time.perf_counter()
+            self.search_stats['fuzzy_time'] = (end_time_fuzzy - start_time_fuzzy) * 1000
+            self.search_stats['fuzzy_count'] = fuzzy_scanned_count
 
-            flat_text = flatten_file_for_pattern_matching(cv_path).lower()
-            if "Error:" in flat_text: continue
-
-            # Hitung dulu kecocokan fuzzy untuk pelamar baru ini
-            fuzzy_applicant_total_match = 0
-            fuzzy_applicant_keyword_matches = {}
-
-            for keyword in keyword_list:
-                fuzzy_matches = fuzzy_match(flat_text, keyword, max_distance)
-                if fuzzy_matches > 0:
-                    fuzzy_applicant_keyword_matches[keyword] = fuzzy_matches
-                    fuzzy_applicant_total_match += fuzzy_matches
-            
-            # Jika ada kecocokan fuzzy, buat struct baru dan tambahkan ke hasil
-            if fuzzy_applicant_total_match > 0:
-                result = ResultStruct(
-                    iID=applicant_id,
-                    iName=f"{applicant['first_name']} {applicant['last_name']}",
-                    iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A",
-                    iAddress=applicant['address'],
-                    iPhone=applicant['phone_number']
-                )
-                result.totalMatch = fuzzy_applicant_total_match
-                result.keywordMatches = fuzzy_applicant_keyword_matches
-                result.cv_path = cv_path
-                result.stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-                final_results_dict[applicant_id] = result
-
-        # Konversi dictionary hasil menjadi list
         final_results = list(final_results_dict.values())
         final_results.sort(key=lambda r: r.totalMatch, reverse=True)
         
@@ -262,7 +240,6 @@ class CVATSSearchApp:
 
     def create_result_card(self, result: ResultStruct):
         keyword_list = [ft.Text(f"- {keyword}: {count}x", size=12, color='black54') for keyword, count in result.keywordMatches.items()]
-        
         return ft.Container(
             content=ft.Column([
                 ft.Text(result.name, size=16, weight=ft.FontWeight.BOLD, color='black'),
@@ -279,7 +256,6 @@ class CVATSSearchApp:
                             style=ft.ButtonStyle(bgcolor='#EACD8C', color='black', shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
                             on_click=lambda _, r=result: self.show_summary_view(r)
                         ),
-                        # --- TAMBAHAN 4: Hubungkan tombol ke fungsi open_pdf_viewer ---
                         ft.FilledButton(
                             text="Show CV", 
                             style=ft.ButtonStyle(bgcolor='#EACD8C', color='black', shape=ft.RoundedRectangleBorder(radius=5), side={ft.ControlState.DEFAULT: ft.BorderSide(1, ft.Colors.BLACK)}),
@@ -289,53 +265,44 @@ class CVATSSearchApp:
                     margin=ft.margin.only(top=10) 
                 )
             ], spacing=4, tight=True),
-            padding=15, border=ft.border.all(2, 'black'), border_radius=8, bgcolor='#F0EFFF', width=280,
+            padding=15, border=ft.border.all(1, ft.Colors.BLACK), border_radius=8, bgcolor='#F0EFFF', width=280,
         )
 
-    # ... (Sisa kode lainnya tetap sama, tidak perlu diubah) ...
     def create_search_settings_content(self):
         return ft.Column([
             ft.Text("Search Settings", size=24, weight=ft.FontWeight.BOLD),
             ft.Row([
                 ft.Column([
                     ft.Text("Algorithm choice:", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.Dropdown(
-                        ref=self.algo_dropdown,
-                        width=200, 
-                        options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM")], 
-                        value="KMP"
-                    )
+                    ft.Dropdown(ref=self.algo_dropdown,width=200, options=[ft.dropdown.Option("KMP"), ft.dropdown.Option("BM")], value="KMP")
                 ]),
                 ft.Column([
                     ft.Text("Keywords (comma-separated):", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.TextField(
-                        ref=self.keyword_input,
-                        hint_text="e.g., python, data science", 
-                        multiline=True, min_lines=3, width=400, border_color='black'
-                    )
+                    ft.TextField(ref=self.keyword_input, hint_text="e.g., python, data science", multiline=True, min_lines=3, width=400, border_color='black')
                 ])
             ], spacing=50, alignment=ft.MainAxisAlignment.CENTER),
             ft.Row([
                 ft.Column([
                     ft.Text("Top choice (optional):", size=14, weight=ft.FontWeight.BOLD), 
-                    ft.TextField(
-                        ref=self.top_search_input,
-                        hint_text="e.g., 5", 
-                        width=200, 
-                        border_color='black',
-                        keyboard_type=ft.KeyboardType.NUMBER
-                    )
+                    ft.TextField(ref=self.top_search_input, hint_text="e.g., 5", width=200, border_color='black', keyboard_type=ft.KeyboardType.NUMBER)
                 ]),
-                ft.ElevatedButton(
-                    "🔍 Search", 
-                    bgcolor="#28A745", color="white", 
-                    style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)), 
-                    on_click=self.perform_search
-                )
+                ft.ElevatedButton("🔍 Search", bgcolor="#28A745", color="white", style=ft.ButtonStyle(shape=ft.RoundedRectangleBorder(radius=5)), on_click=self.perform_search)
             ], spacing=50, alignment=ft.MainAxisAlignment.SPACE_EVENLY, vertical_alignment=ft.CrossAxisAlignment.END)
         ], spacing=20, horizontal_alignment=ft.CrossAxisAlignment.CENTER)
     
     def update_results_display(self):
+        # Update statistik
+        stats = self.search_stats
+        stat_string = ""
+        if stats.get('exact_count', 0) > 0:
+            stat_string += f"Exact Match: {stats['exact_count']} CVs scanned in {stats['exact_time']:.2f}ms."
+        if stats.get('fuzzy_count', 0) > 0:
+            stat_string += f"\nFuzzy Match: {stats['fuzzy_count']} CVs scanned in {stats['fuzzy_time']:.2f}ms."
+
+        if self.stats_text.current:
+            self.stats_text.current.value = stat_string
+        
+        # Update hasil grid
         if not self.search_results:
             self.results_grid.current.controls = [ft.Row([ft.Text("No matching candidates found.")], alignment=ft.MainAxisAlignment.CENTER)]
         else:
@@ -343,18 +310,34 @@ class CVATSSearchApp:
         self.page.update()
 
     def show_main_view(self, e=None):
+        """
+        Menggambar ulang tampilan utama. Sekarang menyertakan tempat untuk statistik.
+        """
+        # Tidak perlu self.page.controls.clear() jika kita hanya ingin memperbarui bagian tertentu
+        # Tapi untuk kesederhanaan, kita gambar ulang semua
         self.page.controls.clear()
+        
         main_content = ft.Container(
             content=ft.Column([
                 self.create_header(),
                 ft.Container(
                     content=ft.Column([
-                        ft.Container(content=ft.Text("Results", size=28, weight=ft.FontWeight.BOLD)),
+                        # Baris judul sekarang berisi teks "Results" dan statistik
+                        ft.Row([
+                            ft.Text("Results", size=28, weight=ft.FontWeight.BOLD),
+                            ft.Container(expand=True), # Pendorong ke kanan
+                            ft.Text(
+                                ref=self.stats_text, 
+                                text_align=ft.TextAlign.RIGHT,
+                                color=ft.Colors.BLACK54
+                            )
+                        ]),
                         ft.GridView(
                             ref=self.results_grid,
                             expand=True, runs_count=5, max_extent=300, child_aspect_ratio=0.8,
                             spacing=20, run_spacing=20,
-                            controls=[ft.Row([ft.Text("Perform a search to see results.")], alignment=ft.MainAxisAlignment.CENTER)]
+                            # Memastikan hasil lama ditampilkan kembali saat navigasi "Back"
+                            controls=[self.create_result_card(result) for result in self.search_results] if self.search_results else [ft.Row([ft.Text("Perform a search to see results.")], alignment=ft.MainAxisAlignment.CENTER)]
                         )
                     ]),
                     padding=20, expand=True
@@ -362,6 +345,8 @@ class CVATSSearchApp:
             ]),
             expand=True
         )
+
+        # Logika modal tetap sama
         self.modal_container = ft.Container(
             content=ft.GestureDetector(
                 content=self.create_draggable_modal(),
@@ -373,9 +358,11 @@ class CVATSSearchApp:
             left=(((self.page.window_width or 1200) * 0.4) / 2)+50,
             top=(self.page.window_height or 900) * self.modal_position
         )
+
         self.page.add(ft.Stack([main_content, self.modal_container], expand=True))
         self.page.update()
     
+    # ... (Sisa kode tidak berubah) ...
     def main(self, page: ft.Page):
         self.page = page
         page.title = "CV ATS Search"
@@ -388,22 +375,10 @@ class CVATSSearchApp:
         self.show_main_view()
     
     def create_header(self):
-        return ft.Container(
-            content=ft.Row([
-                ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"),
-                ft.Container(expand=True),
-                ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color='black'),
-                ft.Container(expand=True),
-                ft.Text(datetime.now().strftime("%H.%M"), size=20, weight=ft.FontWeight.BOLD, color='black')
-            ]),
-            padding=20, bgcolor='#FFF9EB', border=ft.border.only(bottom=ft.border.BorderSide(2, 'black'))
-        )
+        return ft.Container(content=ft.Row([ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"),ft.Container(expand=True),ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color='black'),ft.Container(expand=True),ft.Text(datetime.now().strftime("%H.%M"), size=20, weight=ft.FontWeight.BOLD, color='black')]),padding=20, bgcolor='#FFF9EB', border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK)))
 
     def create_draggable_modal(self):
-        return ft.Container(
-            content=ft.Column([self.create_modal_handle(), ft.Container(content=self.create_search_settings_content(), padding=20, expand=True)], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),
-            bgcolor="#eaf4f4", border=ft.border.all(2, 'black'), border_radius=ft.border_radius.only(top_left=15, top_right=15),
-        )
+        return ft.Container(content=ft.Column([self.create_modal_handle(), ft.Container(content=self.create_search_settings_content(), padding=20, expand=True)], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER),bgcolor="#eaf4f4", border=ft.border.all(1, ft.Colors.BLACK), border_radius=ft.border_radius.only(top_left=15, top_right=15),)
 
     def create_modal_handle(self):
         return ft.Container(content=ft.Container(height=5, width=40, bgcolor='black54', border_radius=3), padding=15, alignment=ft.alignment.center)
@@ -436,20 +411,74 @@ class CVATSSearchApp:
             window_height, window_width = self.page.window_height, self.page.window_width
             self.modal_container.animate_position = ft.Animation(300, "decelerate") if animate else None
             self.modal_container.top = window_height * self.modal_position
-            
             modal_width = window_width * 0.6
             self.modal_container.left = (window_width - modal_width) / 2
             self.modal_container.width = modal_width
-            
             self.page.update()
 
     def on_page_resize(self, e):
         if hasattr(self, 'modal_container'):
             self.update_modal_position(animate=False)
 
+    def _extract_section_content(self, full_text: str, headers: list[str], all_known_headers: list[str]) -> str:
+        stop_headers = [h for h in all_known_headers if h.lower() not in [header.lower() for header in headers]]
+        start_pattern = r'^\s*(' + '|'.join(headers) + r')\s*$'
+        start_match = re.search(start_pattern, full_text, re.IGNORECASE | re.MULTILINE)
+        if not start_match: return ""
+        text_after_start = full_text[start_match.end():]
+        first_stop_position = len(text_after_start)
+        for stop_header in stop_headers:
+            stop_pattern = r'^\s*(' + stop_header + r')\s*$'
+            stop_match = re.search(stop_pattern, text_after_start, re.IGNORECASE | re.MULTILINE)
+            if stop_match and stop_match.start() < first_stop_position:
+                first_stop_position = stop_match.start()
+        return text_after_start[:first_stop_position].strip()
+
+    def _parse_structured_section(self, section_text: str) -> list[dict]:
+        entries = []
+        raw_entries = re.split(r'\n\s*\n+', section_text.strip())
+        for entry_text in raw_entries:
+            if not entry_text.strip(): continue
+            lines = [line.strip() for line in entry_text.strip().split('\n') if line.strip()]
+            if len(lines) > 0:
+                title = lines[0]
+                period = "N/A"
+                desc_lines = []
+                period_found = False
+                for i, line in enumerate(lines[1:]):
+                    if re.search(r'\d{4}|present|current|saat ini', line, re.IGNORECASE):
+                        period = line
+                        desc_lines = lines[i+2:]
+                        period_found = True
+                        break
+                if not period_found: desc_lines = lines[1:]
+                desc = '\n'.join(desc_lines).strip() or "No description."
+                entries.append({'title': title, 'period': period, 'desc': desc})
+        return entries
+
     def show_summary_view(self, candidate: ResultStruct):
-        print(f"Showing summary for: {candidate.name}")
-        pass
+        print(f"Generating summary for: {candidate.name}")
+        self.page.controls.clear()
+        SKILLS_HEADERS = ['skills', 'keahlian', 'skill highlights', 'core qualifications', 'highlights']
+        JOB_HEADERS = ['experience', 'work experience', 'professional experience', 'job history', 'pengalaman kerja', 'riwayat pekerjaan']
+        EDU_HEADERS = ['education', 'education and training', 'pendidikan']
+        ALL_KNOWN_HEADERS = SKILLS_HEADERS + JOB_HEADERS + EDU_HEADERS
+        cv_text = candidate.stringForRegex
+        skills_text = self._extract_section_content(cv_text, SKILLS_HEADERS, ALL_KNOWN_HEADERS)
+        job_text = self._extract_section_content(cv_text, JOB_HEADERS, ALL_KNOWN_HEADERS)
+        edu_text = self._extract_section_content(cv_text, EDU_HEADERS, ALL_KNOWN_HEADERS)
+        job_history_list = self._parse_structured_section(job_text)
+        education_list = self._parse_structured_section(edu_text)
+        intro_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8,content=ft.Column([ft.Text(f"Introducing, {candidate.name}!", size=24, weight=ft.FontWeight.BOLD),ft.Text(f"Address: {candidate.address}", size=14),ft.Text(f"Phone: {candidate.phone}", size=14),]))
+        rank_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#F9E79F",content=ft.Column([ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD),ft.Text(f"of {len(self.search_results)} results", size=16),], horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+        birth_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#A9DFBF",content=ft.Column([ft.Text("Birth Date", size=20, weight=ft.FontWeight.BOLD),ft.Text(candidate.dob, size=24, weight=ft.FontWeight.BOLD),], horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+        skills_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8,content=ft.Column([ft.Text("Skills", size=24, weight=ft.FontWeight.BOLD),ft.Column([ft.Text(skills_text or "No skills section found.", size=16)],expand=True, scroll=ft.ScrollMode.ADAPTIVE)]), expand=True)
+        job_history_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#E8DAEF", expand=True,content=ft.Column([ft.Text("Job History", size=24, weight=ft.FontWeight.BOLD),ft.Column(controls=[ft.Column([ft.Text(f"● {job['title']}", weight=ft.FontWeight.BOLD), ft.Text(job['period'], size=12, italic=True), ft.Text(job['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for job in job_history_list] if job_history_list else [ft.Text("No job history found.")],spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        education_card = ft.Container(padding=20, border=ft.border.all(1, ft.Colors.OUTLINE), border_radius=8, bgcolor="#D4E6F1", expand=True,content=ft.Column([ft.Text("Education", size=24, weight=ft.FontWeight.BOLD),ft.Column(controls=[ft.Column([ft.Text(f"● {edu['title']}", weight=ft.FontWeight.BOLD), ft.Text(edu['period'], size=12, italic=True), ft.Text(edu['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for edu in education_list] if education_list else [ft.Text("No education history found.")],spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        back_button = ft.Container(content=ft.Row([ft.Icon(ft.Icons.ARROW_BACK, color='white'), ft.Text("Back to Results", color='white', size=18, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.CENTER),bgcolor='black', padding=15, border_radius=8, on_click=self.show_main_view, tooltip="Go back to results")
+        summary_layout = ft.Column([self.create_header(),ft.Container(padding=20, expand=True,content=ft.Row([ft.Column([intro_card, ft.Row([rank_card, birth_card], spacing=20), skills_card], spacing=20, expand=2),ft.Column([job_history_card], spacing=20, expand=3),ft.Column([education_card, back_button], spacing=20, expand=3),], spacing=20, expand=True))], expand=True, alignment=ft.MainAxisAlignment.START)
+        self.page.add(summary_layout)
+        self.page.update()
 
 def main(page: ft.Page):
     app = CVATSSearchApp()
