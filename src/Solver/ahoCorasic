@@ -1,4 +1,4 @@
-def aho_corasick_match(s1: str, s2: str) -> list[int]:
+def aho_corasick(s1: str, s2: str) -> list[int]:
     # masukan s1 jangan list, tapi string input yang dipisahin koma
     # returnnya adalah array of integer buat jumlah kemunculan tiap kata di s1
     list1 = [w.strip() for w in s1.split(", ") if w.strip()]
