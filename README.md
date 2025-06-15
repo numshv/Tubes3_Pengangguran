@@ -11,11 +11,38 @@ Sistem ini merupakan implementasi *Applicant Tracking System (ATS)* berbasis pen
 ## Algoritma yang Diimplementasikan
 
 ### Knuth-Morris-Pratt (KMP)
-Algoritma KMP digunakan untuk mencari kemunculan sebuah pattern di dalam teks dengan efisiensi tinggi. KMP menghindari pemeriksaan ulang karakter dengan menggunakan *prefix function* (border array), sehingga waktu pencarian optimal pada kasus terburuk adalah O(n + m).
+Algoritma KMP digunakan untuk mencari kemunculan sebuah pattern (pola) di dalam teks dengan efisiensi tinggi. Keunggulan KMP terletak pada kemampuannya untuk tidak membandingkan ulang karakter pada teks yang sudah pernah dicocokkan. Hal ini dicapai dengan melakukan pra-pemrosesan pada pattern untuk membangun sebuah struktur data yang disebut Fungsi Pembatas, yakni Longest Proper Prefix Suffix - LPS.
+
+## Fungsi Pembatas (LPS Array)
+Fungsi pembatas adalah sebuah array yang untuk setiap sub-pola dari pattern yang menyimpan panjang dari awalan (prefix) terpanjang tapi juga merupakan akhiran (suffix).
+
+## Mekanisme Pergeseran
+Ketika terjadi mismatch antara karakter di teks dan di pattern, KMP tidak menggeser pattern satu langkah ke kanan secara naif. Sebaliknya, ia menggunakan nilai dari Fungsi Pembatas untuk melakukan pergeseran yang optimal.
+
+Jika mismatch terjadi pada karakter ke-j dari pattern, KMP akan melihat nilai pada LPS[j-1]. Nilai ini menunjukkan panjang dari awalan pada pattern yang kita tahu pasti cocok dengan akhiran pada teks sebelum titik mismatch.
+
+Algoritma akan menggeser pattern ke kanan sehingga awalan tersebut sejajar dengan akhiran yang sudah cocok, dan melanjutkan perbandingan dari sana. Hasilnya, waktu pencarian pada kasus terburuk pun tetap optimal, yaitu O(n + m), di mana n adalah panjang teks dan m adalah panjang pattern.
 
 ### Boyer-Moore (BM)
-Boyer-Moore merupakan algoritma pencocokan teks yang sangat efisien dalam praktik. Dengan menggunakan heuristik *bad character*, BM melakukan pencarian dari kanan ke kiri dan dapat melompati banyak karakter sekaligus saat mismatch terjadi, menghasilkan performa lebih cepat pada teks panjang.
+Boyer-Moore merupakan algoritma pencocokan teks yang sering kali menjadi yang tercepat dalam praktik. Kecepatan superiornya berasal dari dua ide brilian: pencocokan dari kanan ke kiri dan kemampuan untuk melompati banyak karakter sekaligus saat terjadi mismatch.
 
+Kemampuan melompat ini dimungkinkan oleh penggunaan fungsi heuristik, terutama Heuristik Bad Character.
+
+## Fungsi Heuristik Last Occurence
+Aturan ini dipicu saat terjadi mismatch. Ia berfokus pada karakter di teks yang menyebabkan ketidakcocokan (disebut juga  bad character).
+
+Tujuan: Menentukan pergeseran aman sejauh mungkin ke kanan berdasarkan posisi kemunculan terakhir dari bad character tersebut di dalam pattern.
+
+## Mekanisme Pergeseran
+Saat mismatch terjadi antara karakter teks T[i] dan karakter pattern P[j]:
+Algoritma melihat karakter bad character di teks, yaitu T[i].
+kemudian periksa di mana T[i] terakhir kali muncul di dalam pattern (di sebelah kiri dari posisi j).
+
+Terdapat Dua Kemungkinan Pergeseran:
+
+Kasus 1: Bad Character tidak ada di pattern. Algoritma tahu bahwa tidak ada kemungkinan kecocokan sampai pattern digeser sepenuhnya melewati posisi T[i]. Ini menghasilkan lompatan terjauh.
+
+Kasus 2: Bad Character ada di pattern. Algoritma menggeser pattern ke kanan sehingga kemunculan terakhir dari karakter tersebut di pattern sejajar dengan T[i] di teks. Ini adalah lompatan yang lebih kecil, namun tetap efisien dan aman.
 ---
 
 ## Requirement & Instalasi
