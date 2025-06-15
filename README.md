@@ -8,7 +8,7 @@ Sistem ini merupakan implementasi *Applicant Tracking System (ATS)* berbasis pen
 
 ---
 
-## Algoritma yang Diimplementasikan
+## Algoritma 
 
 ## Knuth-Morris-Pratt (KMP)
 Algoritma KMP digunakan untuk mencari kemunculan sebuah pattern (pola) di dalam teks dengan efisiensi tinggi. Keunggulan KMP terletak pada kemampuannya untuk tidak membandingkan ulang karakter pada teks yang sudah pernah dicocokkan. Hal ini dicapai dengan melakukan pra-pemrosesan pada pattern untuk membangun sebuah struktur data yang disebut Fungsi Pembatas, yakni Longest Proper Prefix Suffix - LPS.
