@@ -8,6 +8,7 @@ import re
 import time
 import threading
 import concurrent.futures
+import queue
 from pathlib import Path
 
 
@@ -47,28 +48,49 @@ class CVATSSearchApp:
         self.db_config = {
             'host': 'localhost',
             'user': 'root',
-            'password': '',
-            'database': 'ats_pengangguran2'
+            'password': 'Azkarayan',
+            'database': 'ats_pengangguran2',
+            'port': 3307
         }
         self.secret_key = "RAHASIA"
         self.loading_indicator_db = ft.ProgressRing(width=50, height=50)
+        self.loading_text = ft.Text("Setting up database...", size=18)
+        self.progress_bar = ft.ProgressBar(width=400, value=0)
+        self.progress_text = ft.Text("0/0 PDFs cached", size=16)
+
 
         self.project_root_dir = Path(__file__).parent.parent
         self.results_lock = threading.Lock()
 
+        self.cached_cv_data = {}
+        self.progress_queue = queue.Queue()
+        self.total_pdfs_to_cache = 0
+        self.pdfs_cached_count = 0
+
+
     def setup_database_async(self):
+        # Always include the progress bar and text column, their values will update later
         self.page.add(ft.Column([
             ft.Container(expand=True),
-            ft.Row([self.loading_indicator_db, ft.Text("Setting up database...", size=18)], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Row([self.loading_indicator_db, self.loading_text], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Column([self.progress_bar, self.progress_text], alignment=ft.CrossAxisAlignment.CENTER), # Removed conditional rendering
             ft.Container(expand=True)
         ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
         self.page.update()
+
         success = self.setup_database()
-        self.page.controls.clear()
         if success:
+            self.loading_text.value = "Caching PDF files..."
+            self.page.update() # Update the loading text
+
+            self.cache_pdfs_async() # Start caching after DB setup
+            
+            # After caching is done and UI is ready, clear loading screen and show main view
+            self.page.controls.clear()
             self.show_main_view()
             self.update_modal_position(animate=False)
         else:
+            self.page.controls.clear()
             self.page.add(ft.Column([
                 ft.Container(expand=True),
                 ft.Text("Database setup failed. Please check console for errors.", color=ft.colors.RED, size=18),
@@ -76,18 +98,33 @@ class CVATSSearchApp:
             ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
             self.page.update()
 
-
     def setup_database(self):
         print("--- Initializing Database Setup ---")
         try:
             db_server_config = self.db_config.copy()
             db_server_config.pop('database', None)
+            
             print("Trying to connect to MySQL server with db_config...")
             connection = mysql.connector.connect(**db_server_config)
             cursor = connection.cursor()
             print("Successfully connected to MySQL server from Python.")
+            
             db_name = self.db_config['database']
-            print(f"Checking for database '{db_name}' and using it...")
+            
+            # --- Perubahan di sini: Drop database jika sudah ada ---
+            print(f"Dropping database '{db_name}' if it exists...")
+            cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")
+            print(f"Database '{db_name}' dropped (if it existed).")
+            
+            # Close connection to the server, as we are about to create a new database
+            if connection.is_connected():
+                connection.close()
+
+            # Reconnect to ensure we are not "using" a dropped database
+            connection = mysql.connector.connect(**db_server_config)
+            cursor = connection.cursor()
+
+            print(f"Creating database '{db_name}' and using it...")
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             cursor.execute(f"USE {db_name}")
             print(f"Database '{db_name}' is ready.")
@@ -102,17 +139,12 @@ class CVATSSearchApp:
                 except mysql.connector.Error as err:
                     print(f"Failed creating table: {err}")
                     return False
-
-            cursor.execute("SELECT COUNT(*) FROM ApplicantProfile")
-            if cursor.fetchone()[0] == 0:
-                print("Database is empty. Running seeder...")
-                connection.close()
-                run_seeding(self.db_config)
-            else:
-                print("Database already contains data. Skipping seeder.")
             
-            if connection.is_connected():
-                connection.close()
+            # Since we drop and recreate, we always run seeder
+            print("Database recreated. Running seeder...")
+            connection.close() # Close current connection before seeder opens its own
+            run_seeding(self.db_config)
+            
             return True
         except Exception as e:
             print(f"DB Error: {e}")
@@ -164,17 +196,85 @@ class CVATSSearchApp:
         )
         self.update_results_display()
         print("Search and UI update complete.")
-
-    def _run_exact_match_for_applicant(self, applicant, keyword_list, algo_choice, aho_corasick_trie_data=None): # Menambahkan parameter trie
-        """Helper function to run exact matching for a single applicant."""
-        applicant_id = applicant['applicant_id']
-        cv_path_relative = applicant.get('cv_path')
-        if not cv_path_relative:
-            return None
+    
+    def _cache_single_pdf(self, applicant_id: int, cv_path_relative: str, progress_queue: queue.Queue):
+        """Helper function to cache a single PDF file's content."""
         full_cv_path = str(self.project_root_dir / cv_path_relative)
-        flat_text = flatten_file_for_pattern_matching(full_cv_path).lower()
-        if "Error:" in flat_text:
+        try:
+            flat_text = flatten_file_for_pattern_matching(full_cv_path).lower()
+            regex_text = flatten_file_for_regex_multicolumn(full_cv_path)
+            self.cached_cv_data[applicant_id] = {'flat_text': flat_text, 'regex_text': regex_text}
+        except Exception as e:
+            print(f"Error caching {full_cv_path}: {e}")
+            self.cached_cv_data[applicant_id] = {'flat_text': "Error:", 'regex_text': "Error:"} # Store error indicator
+        finally:
+            progress_queue.put(1) # Signal that one PDF has been processed
+
+    def cache_pdfs_async(self):
+        all_applicants_details = []
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            cursor = connection.cursor(dictionary=True)
+            # Fetch only applicant_id and cv_path
+            query = "SELECT p.applicant_id, d.cv_path FROM ApplicantProfile p JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id"
+            cursor.execute(query)
+            all_applicants_details = cursor.fetchall()
+        except mysql.connector.Error as err:
+            print(f"Failed to fetch applicant CV paths from DB: {err}")
+            return
+        finally:
+            if 'connection' in locals() and connection.is_connected():
+                connection.close()
+
+        self.total_pdfs_to_cache = len(all_applicants_details)
+        self.pdfs_cached_count = 0
+        
+        # Update progress bar and text initially
+        self.update_caching_progress_ui() # Call directly, Flet handles thread safety for UI updates
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(self._cache_single_pdf, app['applicant_id'], app['cv_path'], self.progress_queue) for app in all_applicants_details]
+            
+            threading.Thread(target=self._monitor_caching_progress, daemon=True).start()
+            
+            concurrent.futures.wait(futures)
+        
+        self.update_caching_progress_ui()
+        print("PDF Caching complete.")
+
+
+    def _monitor_caching_progress(self):
+        while self.pdfs_cached_count < self.total_pdfs_to_cache:
+            try:
+                processed_count = self.progress_queue.get(timeout=0.1)
+                self.pdfs_cached_count += processed_count
+                self.update_caching_progress_ui() # Call directly, Flet handles thread safety for UI updates
+            except queue.Empty:
+                pass
+        self.update_caching_progress_ui() # Final update after loop
+
+
+    def update_caching_progress_ui(self):
+        if self.total_pdfs_to_cache > 0:
+            progress_value = self.pdfs_cached_count / self.total_pdfs_to_cache
+            self.progress_bar.value = progress_value
+            self.progress_text.value = f"{self.pdfs_cached_count}/{self.total_pdfs_to_cache} PDFs cached"
+        else:
+            self.progress_bar.value = 0
+            self.progress_text.value = "0/0 PDFs cached"
+        if self.page:
+            self.page.update()
+
+
+    def _run_exact_match_for_applicant(self, applicant, keyword_list, algo_choice, aho_corasick_trie_data=None):
+        applicant_id = applicant['applicant_id']
+        
+        cached_data = self.cached_cv_data.get(applicant_id)
+        if not cached_data or "Error:" in cached_data['flat_text']:
             return None
+        
+        flat_text = cached_data['flat_text'].lower()
+        
         current_applicant_exact_matches = {}
         current_applicant_total_exact_match = 0
         if algo_choice == "Aho-Corasick":
@@ -191,23 +291,22 @@ class CVATSSearchApp:
                     current_applicant_total_exact_match += exact_matches
         if current_applicant_total_exact_match > 0:
             result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
-            result.cv_path = cv_path_relative
-            result.stringForRegex = flatten_file_for_regex_multicolumn(full_cv_path)
+            result.cv_path = applicant.get('cv_path')
+            result.stringForRegex = cached_data['regex_text']
             result.keywordMatches = current_applicant_exact_matches
             result.totalMatch = current_applicant_total_exact_match
             return result
         return None
 
     def _run_fuzzy_match_for_applicant(self, applicant, keyword_list, max_distance):
-        """Helper function to run fuzzy matching for a single applicant."""
         applicant_id = applicant['applicant_id']
-        cv_path_relative = applicant.get('cv_path')
-        if not cv_path_relative:
+        
+        cached_data = self.cached_cv_data.get(applicant_id)
+        if not cached_data or "Error:" in cached_data['flat_text']:
             return None
-        full_cv_path = str(self.project_root_dir / cv_path_relative)
-        flat_text = flatten_file_for_pattern_matching(full_cv_path).lower()
-        if "Error:" in flat_text:
-            return None
+        
+        flat_text = cached_data['flat_text'].lower()
+        
         fuzzy_applicant_total_match = 0
         fuzzy_applicant_keyword_matches = {}
         for keyword in keyword_list:
@@ -219,8 +318,8 @@ class CVATSSearchApp:
             result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
             result.totalMatch = fuzzy_applicant_total_match
             result.keywordMatches = fuzzy_applicant_keyword_matches
-            result.cv_path = cv_path_relative
-            result.stringForRegex = flatten_file_for_regex_multicolumn(full_cv_path)
+            result.cv_path = applicant.get('cv_path')
+            result.stringForRegex = cached_data['regex_text']
             return result
         return None
 
@@ -253,8 +352,8 @@ class CVATSSearchApp:
 
         print("--- Phase 1: Performing Exact Search ---")
         start_time_exact = time.perf_counter()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-            exact_search_futures = {executor.submit(self._run_exact_match_for_applicant, applicant, keyword_list, algo_choice, aho_corasick_trie_data): applicant for applicant in all_applicants} # Meneruskan trie
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+            exact_search_futures = {executor.submit(self._run_exact_match_for_applicant, applicant, keyword_list, algo_choice, aho_corasick_trie_data): applicant for applicant in all_applicants}
             for future in concurrent.futures.as_completed(exact_search_futures):
                 applicant = exact_search_futures[future]
                 try:
@@ -276,7 +375,7 @@ class CVATSSearchApp:
             fuzzy_scanned_count = 0
             start_time_fuzzy = time.perf_counter()
             remaining_applicants = [app for app in all_applicants if app['applicant_id'] not in final_results_dict]
-            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
                 fuzzy_search_futures = {executor.submit(self._run_fuzzy_match_for_applicant, applicant, keyword_list, max_distance): applicant for applicant in remaining_applicants}
                 for future in concurrent.futures.as_completed(fuzzy_search_futures):
                     if len(final_results_dict) >= top_choice:
@@ -435,7 +534,7 @@ class CVATSSearchApp:
             on_pan_start=self.on_pan_start, on_pan_update=self.on_pan_update,
             on_pan_end=self.on_pan_end, on_tap=self.toggle_modal,
         )
-        self.modal_container.height=(self.page.window_height or 900) * 0.65
+        self.modal_container.height=(self.page.window.height or 900) * 0.65
         
         self.page.add(ft.Stack([main_content, self.modal_container], expand=True))
         self.page.update()
@@ -483,13 +582,13 @@ class CVATSSearchApp:
 
     def on_pan_start(self, e: ft.DragStartEvent):
         self.drag_start_y = e.global_y
-        if self.page and self.page.window_height > 0: self.modal_start_position = self.modal_container.top / self.page.window_height
+        if self.page and self.page.window.height > 0: self.modal_start_position = self.modal_container.top / self.page.window.height
         else: self.modal_start_position = self.modal_position
 
     def on_pan_update(self, e: ft.DragUpdateEvent):
-        if self.page and self.page.window_height > 0:
+        if self.page and self.page.window.height > 0:
             delta_y = e.global_y - self.drag_start_y
-            new_position = self.modal_start_position + (delta_y / self.page.window_height)
+            new_position = self.modal_start_position + (delta_y / self.page.window.height)
             self.modal_position = max(self.open_pos, min(self.closed_pos, new_position))
             self.update_modal_position(animate=False)
 
@@ -632,9 +731,10 @@ class CVATSSearchApp:
         EDU_HEADERS = ['education', 'education and training', 'pendidikan']
         ALL_KNOWN_HEADERS = SKILLS_HEADERS + JOB_HEADERS + EDU_HEADERS
         
-        full_cv_path_for_regex = str(self.project_root_dir / candidate.cv_path)
-        cv_text = flatten_file_for_regex_multicolumn(full_cv_path_for_regex)
-        
+        cv_text = self.cached_cv_data.get(candidate.id, {}).get('regex_text', "")
+        if not cv_text or "Error:" in cv_text:
+            cv_text = flatten_file_for_regex_multicolumn(str(self.project_root_dir / candidate.cv_path))
+
         skills_text = self._extract_section_content(cv_text, SKILLS_HEADERS, ALL_KNOWN_HEADERS)
         job_text = self._extract_section_content(cv_text, JOB_HEADERS, ALL_KNOWN_HEADERS)
         edu_text = self._extract_section_content(cv_text, EDU_HEADERS, ALL_KNOWN_HEADERS)
@@ -652,7 +752,7 @@ class CVATSSearchApp:
             content=ft.Column([
                 ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
                 ft.Text(f"of {len(self.search_results)} results", size=16)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             expand=True
         )
 
@@ -665,7 +765,7 @@ class CVATSSearchApp:
             content=ft.Column([
                 ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
                 ft.Text(decrypted_dob, size=16, weight=ft.FontWeight.BOLD)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             expand=True
         )
         
