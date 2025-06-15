@@ -6,14 +6,18 @@ import os
 import webbrowser
 import re
 import time
+import threading
+import concurrent.futures
+from pathlib import Path
+
 
 from Database.seeder import run_seeding
 from Solver.kmp import kmp
 from Solver.BM import boyer_moore
 from Solver.levenshtein import fuzzy_match
+from Solver.aho_corasic import aho_corasic, build_trie
 from Utils.utils import flatten_file_for_pattern_matching, flatten_file_for_regex_multicolumn
 from Utils.ResultStruct import ResultStruct
-from Solver.ahoCorasic import aho_corasick
 from Database.encryption import Cipher
 
 
@@ -37,28 +41,53 @@ class CVATSSearchApp:
         self.top_search_input = ft.Ref[ft.TextField]()
         self.results_grid = ft.Ref[ft.GridView]()
         self.stats_text = ft.Ref[ft.Text]()
-        
-        # This will hold the modal container UI element
+        self.time_display = ft.Ref[ft.Text]()
         self.modal_container = ft.Container()
 
         self.db_config = {
             'host': 'localhost',
             'user': 'root',
-            'password': 'n0um1sy1fa',
+            'password': '',
             'database': 'ats_pengangguran2'
         }
         self.secret_key = "RAHASIA"
+        self.loading_indicator_db = ft.ProgressRing(width=50, height=50)
+
+        self.project_root_dir = Path(__file__).parent.parent
+        self.results_lock = threading.Lock()
+
+    def setup_database_async(self):
+        self.page.add(ft.Column([
+            ft.Container(expand=True),
+            ft.Row([self.loading_indicator_db, ft.Text("Setting up database...", size=18)], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Container(expand=True)
+        ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+        self.page.update()
+        success = self.setup_database()
+        self.page.controls.clear()
+        if success:
+            self.show_main_view()
+            self.update_modal_position(animate=False)
+        else:
+            self.page.add(ft.Column([
+                ft.Container(expand=True),
+                ft.Text("Database setup failed. Please check console for errors.", color=ft.colors.RED, size=18),
+                ft.Container(expand=True)
+            ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+            self.page.update()
+
 
     def setup_database(self):
         print("--- Initializing Database Setup ---")
         try:
             db_server_config = self.db_config.copy()
             db_server_config.pop('database', None)
-            
+            print("Trying to connect to MySQL server with db_config...")
             connection = mysql.connector.connect(**db_server_config)
             cursor = connection.cursor()
-            
+            print("Successfully connected to MySQL server from Python.")
             db_name = self.db_config['database']
+            print(f"Checking for database '{db_name}' and using it...")
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             cursor.execute(f"USE {db_name}")
             print(f"Database '{db_name}' is ready.")
@@ -72,6 +101,7 @@ class CVATSSearchApp:
                     cursor.execute(table_sql)
                 except mysql.connector.Error as err:
                     print(f"Failed creating table: {err}")
+                    return False
 
             cursor.execute("SELECT COUNT(*) FROM ApplicantProfile")
             if cursor.fetchone()[0] == 0:
@@ -83,6 +113,10 @@ class CVATSSearchApp:
             
             if connection.is_connected():
                 connection.close()
+            return True
+        except Exception as e:
+            print(f"DB Error: {e}")
+            return False
 
         except mysql.connector.Error as err:
             if err.errno == errorcode.ER_ACCESS_DENIED_ERROR:
@@ -90,11 +124,10 @@ class CVATSSearchApp:
             else:
                 print(f"Database setup failed: {err}")
             return False
-        return True
     
     def open_pdf_viewer(self, cv_path: str):
         try:
-            abs_path = os.path.realpath(cv_path)
+            abs_path = str(self.project_root_dir / cv_path)
             if not os.path.exists(abs_path):
                 print(f"Error: File tidak ditemukan di {abs_path}")
                 return
@@ -102,27 +135,21 @@ class CVATSSearchApp:
         except Exception as e:
             print(f"Gagal membuka file PDF: {e}")
 
-    # Di dalam class CVATSSearchApp:
-
     def perform_search(self, e):
         self.search_stats = {}
         if self.stats_text.current:
             self.stats_text.current.value = ""
-
         algo_choice = self.algo_dropdown.current.value
         keywords_text = self.keyword_input.current.value
         top_search_text = self.top_search_input.current.value
-        
         if not keywords_text:
             print("Search skipped. Keywords are empty.")
             return
-        
         try:
             top_choice = int(top_search_text) if top_search_text else float('inf')
         except ValueError:
             print("Invalid 'Top choice' input. Defaulting to all results.")
             top_choice = float('inf')
-
         loading_indicator = ft.Container(
             content=ft.ProgressRing(),
             alignment=ft.alignment.center,
@@ -130,19 +157,76 @@ class CVATSSearchApp:
         )
         self.results_grid.current.controls = [loading_indicator]
         self.page.update()
-
         self.search_results = self._search_logic(
             keywords=keywords_text,
             algo_choice=algo_choice,
             top_choice=top_choice
         )
-        
         self.update_results_display()
         print("Search and UI update complete.")
 
+    def _run_exact_match_for_applicant(self, applicant, keyword_list, algo_choice, aho_corasick_trie_data=None): # Menambahkan parameter trie
+        """Helper function to run exact matching for a single applicant."""
+        applicant_id = applicant['applicant_id']
+        cv_path_relative = applicant.get('cv_path')
+        if not cv_path_relative:
+            return None
+        full_cv_path = str(self.project_root_dir / cv_path_relative)
+        flat_text = flatten_file_for_pattern_matching(full_cv_path).lower()
+        if "Error:" in flat_text:
+            return None
+        current_applicant_exact_matches = {}
+        current_applicant_total_exact_match = 0
+        if algo_choice == "Aho-Corasick":
+            all_matches = aho_corasic(aho_corasick_trie_data, flat_text)
+            for i, keyword in enumerate(keyword_list):
+                if all_matches[i] > 0:
+                    current_applicant_exact_matches[keyword] = current_applicant_exact_matches.get(keyword, 0) + all_matches[i]
+                    current_applicant_total_exact_match += all_matches[i]
+        else:
+            for keyword in keyword_list:
+                exact_matches = kmp(flat_text, keyword) if algo_choice == "KMP" else boyer_moore(flat_text, keyword)
+                if exact_matches > 0:
+                    current_applicant_exact_matches[keyword] = current_applicant_exact_matches.get(keyword, 0) + exact_matches
+                    current_applicant_total_exact_match += exact_matches
+        if current_applicant_total_exact_match > 0:
+            result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+            result.cv_path = cv_path_relative
+            result.stringForRegex = flatten_file_for_regex_multicolumn(full_cv_path)
+            result.keywordMatches = current_applicant_exact_matches
+            result.totalMatch = current_applicant_total_exact_match
+            return result
+        return None
+
+    def _run_fuzzy_match_for_applicant(self, applicant, keyword_list, max_distance):
+        """Helper function to run fuzzy matching for a single applicant."""
+        applicant_id = applicant['applicant_id']
+        cv_path_relative = applicant.get('cv_path')
+        if not cv_path_relative:
+            return None
+        full_cv_path = str(self.project_root_dir / cv_path_relative)
+        flat_text = flatten_file_for_pattern_matching(full_cv_path).lower()
+        if "Error:" in flat_text:
+            return None
+        fuzzy_applicant_total_match = 0
+        fuzzy_applicant_keyword_matches = {}
+        for keyword in keyword_list:
+            fuzzy_matches = fuzzy_match(flat_text, keyword, max_distance)
+            if fuzzy_matches > 0:
+                fuzzy_applicant_keyword_matches[keyword] = fuzzy_matches
+                fuzzy_applicant_total_match += fuzzy_matches
+        if fuzzy_applicant_total_match > 0:
+            result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
+            result.totalMatch = fuzzy_applicant_total_match
+            result.keywordMatches = fuzzy_applicant_keyword_matches
+            result.cv_path = cv_path_relative
+            result.stringForRegex = flatten_file_for_regex_multicolumn(full_cv_path)
+            return result
+        return None
+
+
     def _search_logic(self, keywords: str, algo_choice: str, top_choice: int, max_distance: int = 2):
         print(f"--- Starting Search with {algo_choice} (Top {top_choice if top_choice != float('inf') else 'All'}) ---")
-        
         all_applicants = []
         try:
             connection = mysql.connector.connect(**self.db_config)
@@ -160,55 +244,29 @@ class CVATSSearchApp:
 
         keyword_list = [kw.strip().lower() for kw in keywords.split(',') if kw.strip()]
         final_results_dict = {}
+        
+        aho_corasick_trie_data = None
+        if algo_choice == "Aho-Corasick":
+            print("Building Aho-Corasick Trie...")
+            aho_corasick_trie_data = build_trie(keyword_list)
+            print("Aho-Corasick Trie built.")
 
         print("--- Phase 1: Performing Exact Search ---")
         start_time_exact = time.perf_counter()
-
-        for applicant in all_applicants:
-            cv_path = applicant.get('cv_path')
-            if not cv_path: continue
-            flat_text = flatten_file_for_pattern_matching(cv_path).lower()
-            if "Error:" in flat_text: continue
-
-            # --- LOGIKA BARU UNTUK PEMILIHAN ALGORITMA ---
-            
-            # Jika Aho-Corasick, proses semua keyword sekaligus
-            if algo_choice == "Aho-Corasick":
-                # Panggil aho_corasick sekali untuk teks ini dengan semua keyword
-                all_matches = aho_corasick(keywords.lower(), flat_text)
-                
-                # Petakan hasil kembali ke setiap keyword
-                for i, keyword in enumerate(keyword_list):
-                    exact_matches = all_matches[i]
-                    if exact_matches > 0:
-                        applicant_id = applicant['applicant_id']
-                        if applicant_id not in final_results_dict:
-                            final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName =f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
-                            final_results_dict[applicant_id].cv_path = cv_path
-                            final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-                        final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
-                        final_results_dict[applicant_id].totalMatch += exact_matches
-
-            # Jika KMP atau BM, gunakan logika lama (satu per satu)
-            else:
-                for keyword in keyword_list:
-                    exact_matches = kmp(flat_text, keyword) if algo_choice == "KMP" else boyer_moore(flat_text, keyword)
-                    if exact_matches > 0:
-                        applicant_id = applicant['applicant_id']
-                        if applicant_id not in final_results_dict:
-                            final_results_dict[applicant_id] = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
-                            final_results_dict[applicant_id].cv_path = cv_path
-                            final_results_dict[applicant_id].stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-                        final_results_dict[applicant_id].keywordMatches[keyword] = final_results_dict[applicant_id].keywordMatches.get(keyword, 0) + exact_matches
-                        final_results_dict[applicant_id].totalMatch += exact_matches
-
-        # --- AKHIR LOGIKA BARU ---
-
+        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
+            exact_search_futures = {executor.submit(self._run_exact_match_for_applicant, applicant, keyword_list, algo_choice, aho_corasick_trie_data): applicant for applicant in all_applicants} # Meneruskan trie
+            for future in concurrent.futures.as_completed(exact_search_futures):
+                applicant = exact_search_futures[future]
+                try:
+                    result = future.result()
+                    if result:
+                        with self.results_lock:
+                            final_results_dict[result.id] = result
+                except Exception as exc:
+                    print(f'{applicant.get("first_name")} generated an exception during exact search: {exc}')
         end_time_exact = time.perf_counter()
         self.search_stats['exact_time'] = (end_time_exact - start_time_exact) * 1000
         self.search_stats['exact_count'] = num_total_applicants
-
-        # ... sisa fungsi (Fuzzy Search & return) tidak perlu diubah ...
         if len(final_results_dict) >= top_choice:
             print("Top choice reached with exact matches. Skipping fuzzy search.")
             self.search_stats['fuzzy_time'] = 0
@@ -217,49 +275,36 @@ class CVATSSearchApp:
             print("--- Phase 2: Performing Fuzzy Search on remaining candidates ---")
             fuzzy_scanned_count = 0
             start_time_fuzzy = time.perf_counter()
-            for applicant in all_applicants:
-                if len(final_results_dict) >= top_choice: break
-                applicant_id = applicant['applicant_id']
-                if applicant_id in final_results_dict: continue
-                
-                fuzzy_scanned_count += 1
-                cv_path = applicant.get('cv_path')
-                if not cv_path: continue
-                flat_text = flatten_file_for_pattern_matching(cv_path).lower()
-                if "Error:" in flat_text: continue
-
-                fuzzy_applicant_total_match = 0
-                fuzzy_applicant_keyword_matches = {}
-                for keyword in keyword_list:
-                    fuzzy_matches = fuzzy_match(flat_text, keyword, max_distance)
-                    if fuzzy_matches > 0:
-                        fuzzy_applicant_keyword_matches[keyword] = fuzzy_matches
-                        fuzzy_applicant_total_match += fuzzy_matches
-                
-                if fuzzy_applicant_total_match > 0:
-                    result = ResultStruct(iID=applicant_id, iFirstName=f"{applicant['first_name']}", iLastName=f"{applicant['last_name']}", iDOB=applicant['date_of_birth'].strftime("%d/%m/%Y") if applicant['date_of_birth'] else "N/A", iAddress=applicant['address'], iPhone=applicant['phone_number'])
-                    result.totalMatch = fuzzy_applicant_total_match
-                    result.keywordMatches = fuzzy_applicant_keyword_matches
-                    result.cv_path = cv_path
-                    result.stringForRegex = flatten_file_for_regex_multicolumn(cv_path)
-                    final_results_dict[applicant_id] = result
+            remaining_applicants = [app for app in all_applicants if app['applicant_id'] not in final_results_dict]
+            with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+                fuzzy_search_futures = {executor.submit(self._run_fuzzy_match_for_applicant, applicant, keyword_list, max_distance): applicant for applicant in remaining_applicants}
+                for future in concurrent.futures.as_completed(fuzzy_search_futures):
+                    if len(final_results_dict) >= top_choice:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+                    applicant = fuzzy_search_futures[future]
+                    fuzzy_scanned_count += 1
+                    try:
+                        result = future.result()
+                        if result:
+                            with self.results_lock:
+                                final_results_dict[result.id] = result
+                    except Exception as exc:
+                        print(f'{applicant.get("first_name")} (fuzzy) generated an exception: {exc}')
+            
             end_time_fuzzy = time.perf_counter()
             self.search_stats['fuzzy_time'] = (end_time_fuzzy - start_time_fuzzy) * 1000
             self.search_stats['fuzzy_count'] = fuzzy_scanned_count
 
         final_results = list(final_results_dict.values())
         final_results.sort(key=lambda r: r.totalMatch, reverse=True)
-        
         print(f"--- Search Finished. Found {len(final_results)} matching candidates. ---")
         return final_results[:top_choice]
 
     def create_result_card(self, result: ResultStruct):
         keyword_list = [ft.Text(f"- {keyword}: {count}x", size=12, color=ft.Colors.BLACK54) for keyword, count in result.keywordMatches.items()]
-        
-        # --- ADJUSTMENT: Card Height and Scrolling ---
-        # The container now has a fixed height. The main Column inside it is set to be scrollable.
         return ft.Container(
-            height=255, # Smaller, fixed height
+            height=255,
             width=280,
             padding=15, 
             border=ft.border.all(1, ft.Colors.BLACK), 
@@ -269,12 +314,8 @@ class CVATSSearchApp:
                 controls=[
                     ft.Text(Cipher.vigenere_decrypt(result.firstName, self.secret_key) + " " + Cipher.vigenere_decrypt(result.lastName, self.secret_key), size=16, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
                     ft.Text(f"{result.totalMatch} total matches", size=12, color=ft.Colors.BLACK54),
-                    # --- ADJUSTMENT: Removed margin from text ---
-                    # The container wrapping this text was removed. Spacing is handled by the parent Column.
                     ft.Text("Matched keywords:", size=12, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
-                    # This column will expand and show a scrollbar if the keyword list is too long
                     ft.Column(keyword_list, spacing=2, expand=True, scroll=ft.ScrollMode.ADAPTIVE),
-                    # Buttons are pushed to the bottom
                     ft.Row(
                         [
                             ft.FilledButton(
@@ -290,7 +331,7 @@ class CVATSSearchApp:
                         ]
                     )
                 ], 
-                spacing=5, # Adjusted spacing
+                spacing=5,
             ),
         )
 
@@ -299,7 +340,6 @@ class CVATSSearchApp:
             ft.Text("Search Settings", size=24, weight=ft.FontWeight.BOLD),
             ft.Row(
                 [
-                    # Left Column
                     ft.Column(
                         [
                             ft.Text("Algorithm choice:", size=14, weight=ft.FontWeight.BOLD), 
@@ -309,7 +349,6 @@ class CVATSSearchApp:
                         ],
                         spacing=10
                     ),
-                    # Right Column
                     ft.Column(
                         [
                             ft.Text("Keywords (comma-separated):", size=14, weight=ft.FontWeight.BOLD), 
@@ -373,7 +412,7 @@ class CVATSSearchApp:
                                     expand=True,
                                     runs_count=5,
                                     max_extent=300,
-                                    child_aspect_ratio=1.0, # Adjusted for new card height
+                                    child_aspect_ratio=1.0,
                                     spacing=20,
                                     run_spacing=20,
                                     controls=[self.create_result_card(result) for result in self.search_results] if self.search_results else [ft.Row([ft.Text("Perform a search to see results.")], alignment=ft.MainAxisAlignment.CENTER)]
@@ -391,7 +430,6 @@ class CVATSSearchApp:
             expand=True,
         )
 
-        # Build the modal but don't set its position yet
         self.modal_container.content = ft.GestureDetector(
             content=self.create_draggable_modal(),
             on_pan_start=self.on_pan_start, on_pan_update=self.on_pan_update,
@@ -407,19 +445,35 @@ class CVATSSearchApp:
         page.title = "CV ATS Search"
         page.bgcolor = "#FFFFFF"
         page.padding = 0
-        page.window_width = 1400
-        page.window_height = 900
-        page.on_resize = self.on_page_resize
-        self.setup_database()
-        self.show_main_view()
+        page.window.width = 1400
+        page.window.height = 900
+        page.on_resized = self.on_page_resize
         
-        # --- ADJUSTMENT: Centered Search Modal ---
-        # Call update_modal_position here after the page has been initialized
-        # to ensure the modal is placed correctly from the start.
-        self.update_modal_position(animate=False)
+        threading.Thread(target=self.setup_database_async).start()
+        threading.Thread(target=self.update_clock, daemon=True).start()
+
+    def update_clock(self):
+        while True:
+            current_time = datetime.now().strftime("%H.%M")
+            if self.time_display.current:
+                self.time_display.current.value = current_time
+                self.page.update()
+            time.sleep(1)
+
 
     def create_header(self):
-        return ft.Container(content=ft.Row([ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"), ft.Container(expand=True), ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK), ft.Container(expand=True), ft.Text(datetime.now().strftime("%H.%M"), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK)]), padding=20, bgcolor='#FFF9EB', border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK)))
+        return ft.Container(
+            content=ft.Row([
+                ft.Text("LOGO", size=20, weight=ft.FontWeight.BOLD, color="#E74C3C"),
+                ft.Container(expand=True),
+                ft.Text("CV ATS Search", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK),
+                ft.Container(expand=True),
+                ft.Text(ref=self.time_display, size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.BLACK)
+            ]),
+            padding=20,
+            bgcolor='#FFF9EB',
+            border=ft.border.only(bottom=ft.border.BorderSide(1, ft.Colors.BLACK))
+        )
 
     def create_draggable_modal(self):
         return ft.Container(content=ft.Column([self.create_modal_handle(), ft.Container(content=self.create_search_settings_content(), padding=20, expand=True)], spacing=0, horizontal_alignment=ft.CrossAxisAlignment.CENTER), bgcolor="#eaf4f4", border=ft.border.all(1, ft.Colors.BLACK), border_radius=ft.border_radius.only(top_left=15, top_right=15))
@@ -451,15 +505,13 @@ class CVATSSearchApp:
         self.update_modal_position(animate=True)
 
     def update_modal_position(self, animate=False):
-        if self.modal_container and self.page and self.page.window_height and self.page.window_width:
-            window_height = self.page.window_height
-            window_width = self.page.window_width
+        if self.modal_container and self.page and self.page.window.height and self.page.window.width:
+            window_height = self.page.window.height
+            window_width = self.page.window.width
             
             self.modal_container.animate_position = ft.Animation(300, "decelerate") if animate else None
             self.modal_container.top = window_height * self.modal_position
             
-            # --- ADJUSTMENT: Centered Search Modal ---
-            # The width and centered left position are now consistently calculated here.
             modal_width = window_width * 0.6
             self.modal_container.width = modal_width
             self.modal_container.left = (window_width - modal_width) / 2
@@ -467,7 +519,6 @@ class CVATSSearchApp:
             self.page.update()
 
     def on_page_resize(self, e):
-        # When page is resized, recalculate the modal's position and size.
         self.update_modal_position(animate=False)
 
     def _extract_section_content(self, full_text: str, headers: list[str], all_known_headers: list[str]) -> str:
@@ -487,7 +538,6 @@ class CVATSSearchApp:
     
     def _parse_structured_section(self, section_text: str) -> list[dict]:
         entries = []
-        # Split by double newlines or specific job separators
         raw_entries = re.split(r'\n\s*\n+|\n(?=\d{2}/\d{4}|\w+\s+\d{4})', section_text.strip())
         
         for entry_text in raw_entries:
@@ -495,7 +545,6 @@ class CVATSSearchApp:
             lines = [line.strip() for line in entry_text.strip().split('\n') if line.strip()]
             if len(lines) == 0: continue
             
-            # Try to identify different CV formats
             entry = self._parse_single_job_entry(lines)
             if entry:
                 entries.append(entry)
@@ -507,12 +556,10 @@ class CVATSSearchApp:
         if not lines:
             return None
             
-        # Pattern 1: Date range at start (e.g., "October 2009 to March 2015")
         date_first_pattern = r'^((?:\w+\s+)?\d{1,2}/?\d{4}(?:\s*(?:to|-)\s*(?:\w+\s+)?\d{1,2}/?\d{4}|\s*to\s*(?:Current|Present))?)'
         if re.match(date_first_pattern, lines[0], re.IGNORECASE):
             period = lines[0]
             if len(lines) > 1:
-                # Next line usually contains company and title
                 company_title = lines[1]
                 desc_lines = lines[2:] if len(lines) > 2 else []
                 title = company_title
@@ -520,10 +567,8 @@ class CVATSSearchApp:
                 title = "Position"
                 desc_lines = []
         
-        # Pattern 2: Title first, then date (e.g., "Customer Service Advocate Jan 2015 to Current")
         elif len(lines) > 0:
             first_line = lines[0]
-            # Look for date patterns in the first line
             date_in_title = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?|\d{1,2}/\d{4}(?:\s*-\s*\d{1,2}/\d{4})?)', first_line, re.IGNORECASE)
             
             if date_in_title:
@@ -531,20 +576,16 @@ class CVATSSearchApp:
                 title = first_line[:date_in_title.start()].strip() or first_line
                 desc_lines = lines[1:]
             else:
-                # Pattern 3: Multi-line format - title, company, dates separate
                 title = lines[0]
                 period = "N/A"
                 desc_start_idx = 1
                 
-                # Look for date in subsequent lines
                 for i, line in enumerate(lines[1:], 1):
                     if re.search(r'\d{4}|present|current', line, re.IGNORECASE):
-                        # Check if this line looks like a date line
                         if re.search(r'^(?:\w+\s+)?\d{1,2}/?\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE):
                             period = line
                             desc_start_idx = i + 1
                             break
-                        # Or if it contains company info with dates
                         elif re.search(r'Company|Corp|Inc|LLC|Ltd', line, re.IGNORECASE):
                             period_match = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?)', line, re.IGNORECASE)
                             if period_match:
@@ -554,17 +595,14 @@ class CVATSSearchApp:
                 
                 desc_lines = lines[desc_start_idx:] if desc_start_idx < len(lines) else []
         
-        # Clean up the description
         desc = '\n'.join(desc_lines).strip()
         
-        # Remove common prefixes and clean up
         desc = re.sub(r'^(Company Name\s*[-–]\s*City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
         desc = re.sub(r'^(City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
         
         if not desc:
             desc = "No description available."
         
-        # Clean up title - remove trailing dates or company placeholders
         title = re.sub(r'\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}.*$', '', title, flags=re.IGNORECASE)
         title = re.sub(r'\s*Company Name.*$', '', title, flags=re.IGNORECASE)
         
@@ -575,7 +613,6 @@ class CVATSSearchApp:
         }
     
     def show_summary_view(self, candidate: ResultStruct):
-        # print(f"Generating summary for: {candidate.name}")
         self.page.controls.clear()
 
         try:
@@ -594,7 +631,10 @@ class CVATSSearchApp:
         JOB_HEADERS = ['experience', 'work experience', 'professional experience', 'job history', 'pengalaman kerja', 'riwayat pekerjaan']
         EDU_HEADERS = ['education', 'education and training', 'pendidikan']
         ALL_KNOWN_HEADERS = SKILLS_HEADERS + JOB_HEADERS + EDU_HEADERS
-        cv_text = candidate.stringForRegex
+        
+        full_cv_path_for_regex = str(self.project_root_dir / candidate.cv_path)
+        cv_text = flatten_file_for_regex_multicolumn(full_cv_path_for_regex)
+        
         skills_text = self._extract_section_content(cv_text, SKILLS_HEADERS, ALL_KNOWN_HEADERS)
         job_text = self._extract_section_content(cv_text, JOB_HEADERS, ALL_KNOWN_HEADERS)
         edu_text = self._extract_section_content(cv_text, EDU_HEADERS, ALL_KNOWN_HEADERS)
@@ -608,7 +648,7 @@ class CVATSSearchApp:
             border=ft.border.all(2, ft.Colors.OUTLINE), 
             border_radius=8, 
             bgcolor="#F9E79F", 
-            height=120,  # Fixed height
+            height=120,
             content=ft.Column([
                 ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
                 ft.Text(f"of {len(self.search_results)} results", size=16)
@@ -621,7 +661,7 @@ class CVATSSearchApp:
             border=ft.border.all(2, ft.Colors.OUTLINE), 
             border_radius=8, 
             bgcolor="#A9DFBF", 
-            height=120,  # Fixed height (same as rank_card)
+            height=120,
             content=ft.Column([
                 ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
                 ft.Text(decrypted_dob, size=16, weight=ft.FontWeight.BOLD)
