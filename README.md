@@ -10,13 +10,13 @@ Sistem ini merupakan implementasi *Applicant Tracking System (ATS)* berbasis pen
 
 ## Algoritma yang Diimplementasikan
 
-### Knuth-Morris-Pratt (KMP)
+## Knuth-Morris-Pratt (KMP)
 Algoritma KMP digunakan untuk mencari kemunculan sebuah pattern (pola) di dalam teks dengan efisiensi tinggi. Keunggulan KMP terletak pada kemampuannya untuk tidak membandingkan ulang karakter pada teks yang sudah pernah dicocokkan. Hal ini dicapai dengan melakukan pra-pemrosesan pada pattern untuk membangun sebuah struktur data yang disebut Fungsi Pembatas, yakni Longest Proper Prefix Suffix - LPS.
 
-## Fungsi Pembatas (LPS Array)
+### Fungsi Pembatas (LPS Array)
 Fungsi pembatas adalah sebuah array yang untuk setiap sub-pola dari pattern yang menyimpan panjang dari awalan (prefix) terpanjang tapi juga merupakan akhiran (suffix).
 
-## Mekanisme Pergeseran
+### Mekanisme Pergeseran
 Ketika terjadi mismatch antara karakter di teks dan di pattern, KMP tidak menggeser pattern satu langkah ke kanan secara naif. Sebaliknya, digunakan nilai dari Fungsi Pembatas untuk melakukan pergeseran yang optimal.
 
 Jika mismatch terjadi pada karakter ke-j dari pattern, KMP akan melihat nilai pada LPS[j-1]. Nilai ini menunjukkan panjang dari awalan pada pattern yang kita tahu pasti cocok dengan akhiran pada teks sebelum titik mismatch.
@@ -28,10 +28,10 @@ Boyer-Moore merupakan algoritma pencocokan teks yang sering kali menjadi yang te
 
 Kemampuan melompat ini dimungkinkan oleh penggunaan fungsi heuristik, terutama Heuristik Bad Character.
 
-## Fungsi Heuristik Last Occurence
+### Fungsi Heuristik Last Occurence
 Fungsi ini dipanggil saat terjadi mismatch. Fungsi ini bertujuan untuk menentukan pergeseran aman sejauh mungkin ke kanan berdasarkan posisi kemunculan terakhir dari karakter yang tidak cocok di dalam pattern.
 
-## Mekanisme Pergeseran
+### Mekanisme Pergeseran
 Saat mismatch terjadi antara karakter teks T[i] dan karakter pattern P[j]:
 Algoritma melihat karakter bad character di teks, yaitu T[i].
 kemudian periksa di mana T[i] terakhir kali muncul di dalam pattern (di sebelah kiri dari posisi j).
