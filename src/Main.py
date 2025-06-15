@@ -10,9 +10,9 @@ import threading
 import concurrent.futures
 import queue
 from pathlib import Path
+import re
 
 
-from Database.seeder import run_seeding
 from Solver.kmp import kmp
 from Solver.BM import boyer_moore
 from Solver.levenshtein import fuzzy_match
@@ -49,47 +49,32 @@ class CVATSSearchApp:
             'host': 'localhost',
             'user': 'root',
             'password': 'Azkarayan',
-            'database': 'ats_pengangguran2',
+            'database': 'pengangguran2',
             'port': 3307
         }
         self.secret_key = "RAHASIA"
-        self.loading_indicator_db = ft.ProgressRing(width=50, height=50)
-        self.loading_text = ft.Text("Setting up database...", size=18)
-        self.progress_bar = ft.ProgressBar(width=400, value=0)
-        self.progress_text = ft.Text("0/0 PDFs cached", size=16)
 
+        self.loading_indicator_db = ft.ProgressRing(width=50, height=50)
+        self.loading_indicator_pdf_cache = ft.ProgressRing(width=50, height=50)
+        self.pdf_cache_progress_text = ft.Ref[ft.Text]()
 
         self.project_root_dir = Path(__file__).parent.parent
         self.results_lock = threading.Lock()
 
-        self.cached_cv_data = {}
+        self.cached_cv_data = {} 
+        self.all_applicants_data = []
         self.progress_queue = queue.Queue()
-        self.total_pdfs_to_cache = 0
-        self.pdfs_cached_count = 0
-
 
     def setup_database_async(self):
-        # Always include the progress bar and text column, their values will update later
         self.page.add(ft.Column([
             ft.Container(expand=True),
-            ft.Row([self.loading_indicator_db, self.loading_text], alignment=ft.MainAxisAlignment.CENTER),
-            ft.Column([self.progress_bar, self.progress_text], alignment=ft.CrossAxisAlignment.CENTER), # Removed conditional rendering
+            ft.Row([self.loading_indicator_db, ft.Text("Setting up database...", size=18)], alignment=ft.MainAxisAlignment.CENTER),
             ft.Container(expand=True)
         ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
         self.page.update()
 
-        success = self.setup_database()
-        if success:
-            self.loading_text.value = "Caching PDF files..."
-            self.page.update() # Update the loading text
-
-            self.cache_pdfs_async() # Start caching after DB setup
-            
-            # After caching is done and UI is ready, clear loading screen and show main view
-            self.page.controls.clear()
-            self.show_main_view()
-            self.update_modal_position(animate=False)
-        else:
+        success_db = self.setup_database()
+        if not success_db:
             self.page.controls.clear()
             self.page.add(ft.Column([
                 ft.Container(expand=True),
@@ -97,54 +82,82 @@ class CVATSSearchApp:
                 ft.Container(expand=True)
             ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
             self.page.update()
+            return
+
+        self.page.controls.clear()
+        self.page.add(ft.Column([
+            ft.Container(expand=True),
+            ft.Row([
+                self.loading_indicator_pdf_cache, 
+                ft.Column([
+                    ft.Text("Caching PDF content...", size=18),
+                    ft.Text(ref=self.pdf_cache_progress_text, size=14, color=ft.colors.BLACK54)
+                ], spacing=5)
+            ], alignment=ft.MainAxisAlignment.CENTER),
+            ft.Container(expand=True)
+        ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+        self.page.update()
+        
+        success_cache = self.cache_pdfs_async()
+        
+        self.page.controls.clear()
+        if success_cache:
+            self.show_main_view()
+            self.update_modal_position(animate=False)
+        else:
+            self.page.add(ft.Column([
+                ft.Container(expand=True),
+                ft.Text("PDF caching failed. Search performance might be affected.", color=ft.colors.ORANGE_800, size=18),
+                ft.Container(expand=True)
+            ], expand=True, horizontal_alignment=ft.CrossAxisAlignment.CENTER))
+            self.show_main_view()
+            self.update_modal_position(animate=False)
+        self.page.update()
+
 
     def setup_database(self):
         print("--- Initializing Database Setup ---")
         try:
             db_server_config = self.db_config.copy()
             db_server_config.pop('database', None)
-            
             print("Trying to connect to MySQL server with db_config...")
             connection = mysql.connector.connect(**db_server_config)
             cursor = connection.cursor()
             print("Successfully connected to MySQL server from Python.")
-            
             db_name = self.db_config['database']
-            
-            # --- Perubahan di sini: Drop database jika sudah ada ---
-            print(f"Dropping database '{db_name}' if it exists...")
-            cursor.execute(f"DROP DATABASE IF EXISTS {db_name}")
-            print(f"Database '{db_name}' dropped (if it existed).")
-            
-            # Close connection to the server, as we are about to create a new database
-            if connection.is_connected():
-                connection.close()
-
-            # Reconnect to ensure we are not "using" a dropped database
-            connection = mysql.connector.connect(**db_server_config)
-            cursor = connection.cursor()
-
-            print(f"Creating database '{db_name}' and using it...")
+            print(f"Checking for database '{db_name}' and using it...")
             cursor.execute(f"CREATE DATABASE IF NOT EXISTS {db_name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
             cursor.execute(f"USE {db_name}")
             print(f"Database '{db_name}' is ready.")
 
-            tables = {
-                "ApplicantProfile": "CREATE TABLE IF NOT EXISTS `ApplicantProfile` (`applicant_id` INT PRIMARY KEY NOT NULL, `first_name` VARCHAR(50) DEFAULT NULL, `last_name` VARCHAR(50) DEFAULT NULL, `date_of_birth` DATE DEFAULT NULL, `address` VARCHAR(255) DEFAULT NULL, `phone_number` VARCHAR(20) DEFAULT NULL) ENGINE=InnoDB;",
-                "ApplicantDetail": "CREATE TABLE IF NOT EXISTS `ApplicantDetail` (`applicant_id` INT PRIMARY KEY NOT NULL AUTO_INCREMENT, `application_role` VARCHAR(100) DEFAULT NULL, `cv_path` TEXT) ENGINE=InnoDB;"
-            }
-            for table_name, table_sql in tables.items():
-                try:
-                    cursor.execute(table_sql)
-                except mysql.connector.Error as err:
-                    print(f"Failed creating table: {err}")
-                    return False
+            schema_file_path = self.project_root_dir / "src" / "Database" / "schema.sql"
+            if not schema_file_path.exists():
+                print(f"Error: schema.sql not found at {schema_file_path}")
+                return False
+
+            with open(schema_file_path, 'r', encoding='utf8') as f:
+                sql_script = f.read()
             
-            # Since we drop and recreate, we always run seeder
-            print("Database recreated. Running seeder...")
-            connection.close() # Close current connection before seeder opens its own
-            run_seeding(self.db_config)
+            commands_to_execute = [cmd.strip() for cmd in sql_script.split(';') if cmd.strip() and not cmd.strip().startswith('--')]
             
+            for command in commands_to_execute:
+                if command:
+                    try:
+                        cursor.execute(command)
+                        connection.commit()
+                        print(f"Executed: {command[:50]}...")
+                    except mysql.connector.Error as err:
+                        print(f"Failed to execute SQL command: {command[:50]}... Error: {err}")
+                        connection.rollback()
+                        return False
+
+            print("Database schema and data loaded from provided SQL.")
+            
+            from Database.seeder import encrypt_all_profiles
+            encrypt_all_profiles(self.db_config, self.secret_key)
+
+            if connection.is_connected():
+                connection.close()
             return True
         except Exception as e:
             print(f"DB Error: {e}")
@@ -156,6 +169,7 @@ class CVATSSearchApp:
             else:
                 print(f"Database setup failed: {err}")
             return False
+
     
     def open_pdf_viewer(self, cv_path: str):
         try:
@@ -206,22 +220,21 @@ class CVATSSearchApp:
             self.cached_cv_data[applicant_id] = {'flat_text': flat_text, 'regex_text': regex_text}
         except Exception as e:
             print(f"Error caching {full_cv_path}: {e}")
-            self.cached_cv_data[applicant_id] = {'flat_text': "Error:", 'regex_text': "Error:"} # Store error indicator
+            self.cached_cv_data[applicant_id] = {'flat_text': "Error:", 'regex_text': "Error:"}
         finally:
-            progress_queue.put(1) # Signal that one PDF has been processed
+            progress_queue.put(1)
 
     def cache_pdfs_async(self):
         all_applicants_details = []
         try:
             connection = mysql.connector.connect(**self.db_config)
             cursor = connection.cursor(dictionary=True)
-            # Fetch only applicant_id and cv_path
-            query = "SELECT p.applicant_id, d.cv_path FROM ApplicantProfile p JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id"
+            query = "SELECT p.applicant_id, d.cv_path FROM ApplicantProfile p JOIN ApplicationDetail d ON p.applicant_id = d.applicant_id"
             cursor.execute(query)
             all_applicants_details = cursor.fetchall()
         except mysql.connector.Error as err:
             print(f"Failed to fetch applicant CV paths from DB: {err}")
-            return
+            return False 
         finally:
             if 'connection' in locals() and connection.is_connected():
                 connection.close()
@@ -229,8 +242,7 @@ class CVATSSearchApp:
         self.total_pdfs_to_cache = len(all_applicants_details)
         self.pdfs_cached_count = 0
         
-        # Update progress bar and text initially
-        self.update_caching_progress_ui() # Call directly, Flet handles thread safety for UI updates
+        self.update_caching_progress_ui()
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = [executor.submit(self._cache_single_pdf, app['applicant_id'], app['cv_path'], self.progress_queue) for app in all_applicants_details]
@@ -241,6 +253,7 @@ class CVATSSearchApp:
         
         self.update_caching_progress_ui()
         print("PDF Caching complete.")
+        return True
 
 
     def _monitor_caching_progress(self):
@@ -248,20 +261,20 @@ class CVATSSearchApp:
             try:
                 processed_count = self.progress_queue.get(timeout=0.1)
                 self.pdfs_cached_count += processed_count
-                self.update_caching_progress_ui() # Call directly, Flet handles thread safety for UI updates
+                self.update_caching_progress_ui()
             except queue.Empty:
                 pass
-        self.update_caching_progress_ui() # Final update after loop
+        self.update_caching_progress_ui()
 
 
     def update_caching_progress_ui(self):
         if self.total_pdfs_to_cache > 0:
             progress_value = self.pdfs_cached_count / self.total_pdfs_to_cache
-            self.progress_bar.value = progress_value
-            self.progress_text.value = f"{self.pdfs_cached_count}/{self.total_pdfs_to_cache} PDFs cached"
+            self.loading_indicator_pdf_cache.value = progress_value 
+            self.pdf_cache_progress_text.current.value = f"{self.pdfs_cached_count}/{self.total_pdfs_to_cache} PDFs cached"
         else:
-            self.progress_bar.value = 0
-            self.progress_text.value = "0/0 PDFs cached"
+            self.loading_indicator_pdf_cache.value = 0
+            self.pdf_cache_progress_text.current.value = "0/0 PDFs cached"
         if self.page:
             self.page.update()
 
@@ -621,95 +634,349 @@ class CVATSSearchApp:
         self.update_modal_position(animate=False)
 
     def _extract_section_content(self, full_text: str, headers: list[str], all_known_headers: list[str]) -> str:
-        stop_headers = [h for h in all_known_headers if h.lower() not in [header.lower() for header in headers]]
-        start_pattern = r'^\s*(' + '|'.join(headers) + r')\s*$'
+        """Mengekstrak blok teks dari sebuah seksi (misal, 'Experience') hingga seksi berikutnya."""
+        safe_headers = [re.escape(h) for h in headers]
+        safe_stop_headers = [re.escape(h) for h in all_known_headers if h.lower() not in [header.lower() for header in headers]]
+
+        start_pattern = r'^\s*(?:' + '|'.join(safe_headers) + r')\s*$'
         start_match = re.search(start_pattern, full_text, re.IGNORECASE | re.MULTILINE)
-        if not start_match: return ""
+        
+        if not start_match:
+            return ""
+
         text_after_start = full_text[start_match.end():]
         first_stop_position = len(text_after_start)
-        for stop_header in stop_headers:
-            stop_pattern = r'^\s*(' + stop_header + r')\s*$'
+
+        if safe_stop_headers:
+            stop_pattern = r'^\s*(?:' + '|'.join(safe_stop_headers) + r')\s*$'
             stop_match = re.search(stop_pattern, text_after_start, re.IGNORECASE | re.MULTILINE)
-            if stop_match and stop_match.start() < first_stop_position:
+            if stop_match:
                 first_stop_position = stop_match.start()
+
         return text_after_start[:first_stop_position].strip()
 
-    
     def _parse_structured_section(self, section_text: str) -> list[dict]:
-        entries = []
-        raw_entries = re.split(r'\n\s*\n+|\n(?=\d{2}/\d{4}|\w+\s+\d{4})', section_text.strip())
+        """MANAJER PARSER: Mencoba setiap 'pakar' parser pekerjaan."""
+        if not section_text: return []
         
-        for entry_text in raw_entries:
-            if not entry_text.strip(): continue
-            lines = [line.strip() for line in entry_text.strip().split('\n') if line.strip()]
-            if len(lines) == 0: continue
-            
-            entry = self._parse_single_job_entry(lines)
-            if entry:
-                entries.append(entry)
+        job_parsers = [
+            self._parse_jobs_format_specific,
+            self._parse_jobs_format_general,
+            self._parse_jobs_flexible,
+        ]
+
+        for parser in job_parsers:
+            try:
+                entries = parser(section_text)
+                if entries:
+                    print(f"Job History parsed with: {parser.__name__}")
+                    return entries
+            except Exception as e:
+                print(f"Parser {parser.__name__} failed: {e}")
         
-        return entries
+        print("All job parsers failed.")
+        return []
     
+    def _parse_jobs_flexible(self, section_text: str) -> list[dict]:
+        """
+        [PAKAR UTAMA] Menangani berbagai format riwayat pekerjaan dengan fokus pada senioritas.
+        """
+        entries = []
+        
+        date_range_pattern = r"""
+            (?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4}|\d{1,2}[/-]\d{4}) # Tanggal mulai
+            \s*(?:to|-|hingga|sampai)\s* # Pemisah
+            (?:Current|Present|Sekarang|(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})|(?:\d{1,2}[/-]\d{4})) # Tanggal selesai
+        """
+        
+        job_title_pattern = r"""
+            \b(?:Lead|Senior|Junior|Head\s+of|Manager|Staff|Intern|Specialist|Coordinator|Director|Engineer|Developer|Analyst|Designer)\b[\w\s-]*
+        """
+        
+        blocks = re.split(r'\n\s*\n+', section_text.strip())
+        
+        for block in blocks:
+            if not block.strip():
+                continue
+
+            title = "N/A"
+            period = "N/A"
+            description = block
+
+            period_match = re.search(date_range_pattern, description, re.IGNORECASE | re.VERBOSE)
+            if period_match:
+                period = period_match.group(0).strip()
+                description = description.replace(period, '').strip()
+            
+            title_match = re.search(job_title_pattern, description, re.IGNORECASE | re.VERBOSE)
+            if title_match:
+                title = title_match.group(0).strip()
+                description = description.replace(title, '').strip()
+            else:
+                lines = description.strip().split('\n')
+                if lines:
+                    title = lines[0].strip()
+                    description = '\n'.join(lines[1:]).strip()
+
+            cleaned_desc = '\n'.join([line.lstrip('•●- ').strip() for line in description.split('\n') if line.strip()])
+
+            entries.append({
+                'title': title,
+                'period': period,
+                'desc': cleaned_desc
+            })
+            
+        return [e for e in entries if e['title'] != 'N/A' or e['desc']]
+
+    def _parse_jobs_format_specific(self, section_text: str) -> list[dict]:
+        """PAKAR 1: Menangani format terstruktur (termasuk bullet point)."""
+        splitter_pattern = re.compile(r"""
+            \n\s*
+            (?=
+                (?:^\s*●\s[^\n]+\n\s*\d{2}/\d{4}\s*-\s*\d{2}/\d{4})
+                |
+                (?:^\s*\d{2}/\d{4}\s*-\s*\d{2}/\d{4}\s*$)
+            )
+        """, re.MULTILINE | re.VERBOSE)
+
+        raw_entries = splitter_pattern.split(section_text)
+        if len(raw_entries) <= 1: return []
+
+        parsed_entries = []
+        for entry_text in raw_entries:
+            lines = [line.strip() for line in entry_text.strip().split('\n') if line.strip()]
+            if lines:
+                entry = self._parse_single_block_specific(lines)
+                if entry:
+                    parsed_entries.append(entry)
+        return parsed_entries
+
+    def _parse_jobs_format_general(self, section_text: str) -> list[dict]:
+        """PAKAR 2: Menangani format 'acak' dengan memecah per baris kosong lalu menggabungkan."""
+        entries = []
+        date_pattern = re.compile(r"""
+            ^
+            (
+                (?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})
+                |
+                (?:\d{1,2}/\d{4})
+            )
+            \s*(?:to|-)\s*
+            (?:Current|Present|(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})|(?:\d{1,2}/\d{4}))
+            $
+        """, re.IGNORECASE | re.VERBOSE)
+
+        current_entry = {}
+        blocks = re.split(r'\n\s*\n+', section_text)
+
+        for block in blocks:
+            lines = block.strip().split('\n')
+            first_line = lines[0].strip()
+
+            if date_pattern.match(first_line):
+                if current_entry.get('title') and current_entry.get('desc'):
+                    entries.append(current_entry)
+                
+                current_entry = {'period': first_line, 'desc': ''}
+                
+                if len(lines) > 1:
+                    title_info = "\n".join(lines[1:])
+                    current_entry['title'] = title_info
+                
+            elif 'Company Name' in first_line or 'City, State' in "\n".join(lines):
+                if current_entry.get('title') and current_entry.get('desc'):
+                     entries.append(current_entry)
+                     current_entry = {} # Reset
+                
+                current_entry['title'] = block
+                if 'period' not in current_entry:
+                    current_entry['period'] = 'N/A'
+                if 'desc' not in current_entry:
+                    current_entry['desc'] = ''
+
+            elif current_entry:
+                if 'desc' not in current_entry:
+                    current_entry['desc'] = ''
+                current_entry['desc'] += ('\n' if current_entry['desc'] else '') + block
+        
+        if current_entry.get('title'):
+            entries.append(current_entry)
+
+        return entries
+
+    def _parse_single_block_specific(self, lines: list[str]) -> dict:
+        """HELPER: Mem-parse blok tunggal dari parser spesifik."""
+        if not lines: return None
+        
+        if lines[0].strip().startswith('●') and len(lines) > 1 and re.fullmatch(r'\d{2}/\d{4}\s*-\s*\d{2}/\d{4}', lines[1].strip()):
+            title = lines[0].strip()[1:].strip()
+            period = lines[1].strip()
+            desc_lines = [l.strip()[1:].strip() if l.strip().startswith('●') else l.strip() for l in lines[2:] if l.strip().lower() != 'n/a']
+            return {'title': title, 'period': period, 'desc': '\n'.join(desc_lines)}
+
+        elif re.fullmatch(r'\d{2}/\d{4}\s*-\s*\d{2}/\d{4}', lines[0].strip()):
+            period = lines[0].strip()
+            title = lines[1] if len(lines) > 1 else "N/A"
+            description = '\n'.join(lines[2:])
+            return {'title': title, 'period': period, 'desc': description}
+        return None
+
+
+    def _parse_education_section(self, section_text: str) -> list[dict]:
+        """MANAJER PARSER PENDIDIKAN."""
+        if not section_text: return []
+        
+        edu_parsers = [
+            self._parse_education_format_classic,
+            self._parse_education_format_year_first,
+            self._parse_education_flexible,
+        ]
+
+        for parser in edu_parsers:
+            try:
+                entries = parser(section_text)
+                if entries:
+                    print(f"Education parsed with: {parser.__name__}")
+                    return entries
+            except Exception as e:
+                print(f"Parser {parser.__name__} failed: {e}")
+        
+        print("All education parsers failed.")
+        return []
+
+    def _parse_education_format_classic(self, section_text: str) -> list[dict]:
+        """PAKAR PENDIDIKAN 1: Menangani format NAMA_UNIV [Tahun] [Gelar]."""
+        entries = []
+        pattern = re.compile(
+            r"^(?P<school>[A-Z\s,]+(?:UNIVERSITY|COLLEGE))\s*.*?(?P<year>\d{4})\s+(?P<degree>[^\n]+(?:\n[^\n]+)*)",
+            re.MULTILINE | re.IGNORECASE
+        )
+        
+        for match in pattern.finditer(section_text):
+            data = match.groupdict()
+            desc = f"School: {data['school'].strip()}"
+            gpa_search = re.search(r"GPA:\s*([\d\.]+)", data['degree'])
+            if gpa_search:
+                desc += f"\nGPA: {gpa_search.group(1)}"
+            
+            degree_clean = re.sub(r'gpa:.*','', data['degree'], flags=re.IGNORECASE).strip()
+
+            entries.append({
+                'title': degree_clean,
+                'period': data['year'],
+                'desc': desc
+            })
+        return entries
+
+    def _parse_education_flexible(self, section_text: str) -> list[dict]:
+        """[PAKAR UTAMA] Menangani berbagai format pendidikan dengan memisahkan gelar dan institusi."""
+        entries = []
+        
+        degree_pattern = r"""
+            \b(?:
+                Master(?:\s+of\s+[\w\s]+)? | Bachelor(?:\s+of\s+[\w\s]+)? |
+                Sarjana(?:\s+[\w\s,]+)? | Diploma(?:\s+[\w\d]+)? |
+                Ph\.?D\.? | M\.?Sc\.? | M\.?B\.?A\.? | S\.?\s?\w{2,}\. |
+                S-?\d | D-?\d
+            )\b
+        """
+        institution_pattern = r"""
+            \b(?:
+                University|Universitas|Institute|Institut|College|
+                Sekolah\s+Tinggi|Politeknik|Academy|Akademi
+            )[\w\s,.]*
+        """
+        year_pattern = r'\b(\d{4}(?:\s*(?:-|to|sampai|hingga)\s*\d{2,4})?)\b'
+        
+        blocks = re.split(r'\n\s*\n+', section_text.strip())
+
+        for block in blocks:
+            if not block.strip():
+                continue
+                
+            title, period, inst_desc = "N/A", "N/A", ""
+            remaining_block = block
+
+            degree_match = re.search(degree_pattern, remaining_block, re.IGNORECASE | re.VERBOSE)
+            if degree_match:
+                title = degree_match.group(0).strip().replace('\n', ' ')
+                remaining_block = remaining_block.replace(degree_match.group(0), '').strip()
+            
+            institution_match = re.search(institution_pattern, remaining_block, re.IGNORECASE | re.VERBOSE)
+            if institution_match:
+                inst_desc = institution_match.group(0).strip().replace('\n', ' ')
+                remaining_block = remaining_block.replace(institution_match.group(0), '').strip()
+
+            year_match = re.search(year_pattern, remaining_block)
+            if year_match:
+                period = year_match.group(1).strip()
+                remaining_block = remaining_block.replace(period, '').strip()
+
+            final_desc = (inst_desc + " " + remaining_block.replace('\n', ' ').strip()).strip()
+            final_desc = re.sub(r'^\W+', '', final_desc) # Hapus non-alphanum di awal
+
+            if title == "N/A":
+                title = block.split('\n')[0]
+
+            entries.append({
+                'title': title,
+                'period': period,
+                'desc': final_desc
+            })
+            
+        return [e for e in entries if e['title'] != "N/A" or e['desc']]
+
+    def _parse_education_format_year_first(self, section_text: str) -> list[dict]:
+        """PAKAR PENDIDIKAN 2: Menangani format Tahun lalu Nama Universitas."""
+        lines = [line.strip() for line in section_text.split('\n') if line.strip()]
+        if not lines or not re.fullmatch(r'\d{4}', lines[0]): return []
+
+        period = lines[0]
+        title_line = lines[1] if len(lines) > 1 else ""
+        desc_lines = lines[2:]
+        title = title_line.split(':')[1].strip() if ':' in title_line else title_line
+        institution = title_line.split(':')[0].strip() if ':' in title_line else title_line
+        description = f"{institution}\n" + '\n'.join(desc_lines)
+        
+        return [{'title': title, 'period': period, 'desc': description.strip()}]
+
+
     def _parse_single_job_entry(self, lines: list[str]) -> dict:
-        """Parse a single job entry handling various CV formats"""
+        """
+        PARSER BLOK TUNGGAL: Khusus untuk mem-parse blok yang sudah dipisahkan oleh
+        _parse_jobs_format_bullet_point.
+        """
         if not lines:
             return None
             
-        date_first_pattern = r'^((?:\w+\s+)?\d{1,2}/?\d{4}(?:\s*(?:to|-)\s*(?:\w+\s+)?\d{1,2}/?\d{4}|\s*to\s*(?:Current|Present))?)'
-        if re.match(date_first_pattern, lines[0], re.IGNORECASE):
-            period = lines[0]
-            if len(lines) > 1:
-                company_title = lines[1]
-                desc_lines = lines[2:] if len(lines) > 2 else []
-                title = company_title
+        if lines[0].strip().startswith('●') and len(lines) > 1 and re.fullmatch(r'\d{2}/\d{4}\s*-\s*\d{2}/\d{4}', lines[1].strip()):
+            title = lines[0].strip()[1:].strip()
+            period = lines[1].strip()
+            desc_lines = lines[2:]
+            clean_desc_lines = []
+            for line in desc_lines:
+                stripped_line = line.strip()
+                if stripped_line.lower() == 'n/a': continue
+                if stripped_line.startswith('●'):
+                    clean_desc_lines.append(stripped_line[1:].strip())
+                else:
+                    clean_desc_lines.append(stripped_line)
+            description = '\n'.join(clean_desc_lines)
+            return {'title': title, 'period': period, 'desc': description}
+
+        elif re.fullmatch(r'\d{2}/\d{4}\s*-\s*\d{2}/\d{4}', lines[0].strip()):
+            period = lines[0].strip()
+            title_line = lines[1] if len(lines) > 1 else ""
+            desc_lines = lines[2:] if len(lines) > 2 else []
+            title_match = re.search(r'.*,\s*\w+\s+(.*)', title_line)
+            if title_match:
+                title = title_match.group(1).strip()
             else:
-                title = "Position"
-                desc_lines = []
-        
-        elif len(lines) > 0:
-            first_line = lines[0]
-            date_in_title = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?|\d{1,2}/\d{4}(?:\s*-\s*\d{1,2}/\d{4})?)', first_line, re.IGNORECASE)
+                title = title_line.split('∩╝')[-1].strip() if '∩╝' in title_line else title_line
+            description = '\n'.join(line.strip() for line in desc_lines)
+            return {'title': title, 'period': period, 'desc': description}
             
-            if date_in_title:
-                period = date_in_title.group(1)
-                title = first_line[:date_in_title.start()].strip() or first_line
-                desc_lines = lines[1:]
-            else:
-                title = lines[0]
-                period = "N/A"
-                desc_start_idx = 1
-                
-                for i, line in enumerate(lines[1:], 1):
-                    if re.search(r'\d{4}|present|current', line, re.IGNORECASE):
-                        if re.search(r'^(?:\w+\s+)?\d{1,2}/?\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', line, re.IGNORECASE):
-                            period = line
-                            desc_start_idx = i + 1
-                            break
-                        elif re.search(r'Company|Corp|Inc|LLC|Ltd', line, re.IGNORECASE):
-                            period_match = re.search(r'(\w{3}\s+\d{4}(?:\s+to\s+(?:Current|\w{3}\s+\d{4}))?)', line, re.IGNORECASE)
-                            if period_match:
-                                period = period_match.group(1)
-                                desc_start_idx = i + 1
-                                break
-                
-                desc_lines = lines[desc_start_idx:] if desc_start_idx < len(lines) else []
-        
-        desc = '\n'.join(desc_lines).strip()
-        
-        desc = re.sub(r'^(Company Name\s*[-–]\s*City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
-        desc = re.sub(r'^(City\s*,\s*State\s*)', '', desc, flags=re.IGNORECASE)
-        
-        if not desc:
-            desc = "No description available."
-        
-        title = re.sub(r'\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}.*$', '', title, flags=re.IGNORECASE)
-        title = re.sub(r'\s*Company Name.*$', '', title, flags=re.IGNORECASE)
-        
-        return {
-            'title': title.strip() or "Position",
-            'period': period.strip(),
-            'desc': desc
-        }
+        return None
     
     def show_summary_view(self, candidate: ResultStruct):
         self.page.controls.clear()
@@ -726,20 +993,21 @@ class CVATSSearchApp:
             decrypted_phone = f"{candidate.phone} (Decryption Failed)"
             decrypted_dob = f"{candidate.dob} (Decryption Failed)"
 
-        SKILLS_HEADERS = ['skills', 'keahlian', 'skill highlights', 'core qualifications', 'highlights']
+        PRIMARY_SKILLS_HEADERS = ['skills', 'keahlian']
+        SECONDARY_SKILLS_HEADERS = ['skills', 'keahlian', 'skill highlights', 'core qualifications', 'highlights']
         JOB_HEADERS = ['experience', 'work experience', 'professional experience', 'job history', 'pengalaman kerja', 'riwayat pekerjaan']
         EDU_HEADERS = ['education', 'education and training', 'pendidikan']
-        ALL_KNOWN_HEADERS = SKILLS_HEADERS + JOB_HEADERS + EDU_HEADERS
-        
-        cv_text = self.cached_cv_data.get(candidate.id, {}).get('regex_text', "")
-        if not cv_text or "Error:" in cv_text:
-            cv_text = flatten_file_for_regex_multicolumn(str(self.project_root_dir / candidate.cv_path))
-
-        skills_text = self._extract_section_content(cv_text, SKILLS_HEADERS, ALL_KNOWN_HEADERS)
+        ALL_KNOWN_HEADERS = PRIMARY_SKILLS_HEADERS + SECONDARY_SKILLS_HEADERS + JOB_HEADERS + EDU_HEADERS
+        cv_text = candidate.stringForRegex
+        skills_text = self._extract_section_content(cv_text, PRIMARY_SKILLS_HEADERS, ALL_KNOWN_HEADERS)
+        if not skills_text:
+            print("Primary skills section not found, trying secondary headers...")
+            skills_text = self._extract_section_content(cv_text, SECONDARY_SKILLS_HEADERS, ALL_KNOWN_HEADERS)
         job_text = self._extract_section_content(cv_text, JOB_HEADERS, ALL_KNOWN_HEADERS)
         edu_text = self._extract_section_content(cv_text, EDU_HEADERS, ALL_KNOWN_HEADERS)
+        
         job_history_list = self._parse_structured_section(job_text)
-        education_list = self._parse_structured_section(edu_text)
+        education_list = self._parse_education_section(edu_text)
         
         intro_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text(f"Introducing, {decrypted_name}!", size=24, weight=ft.FontWeight.BOLD), ft.Text(f"Address: {decrypted_address}", size=14), ft.Text(f"Phone: {decrypted_phone}", size=14)]))
         
@@ -748,11 +1016,11 @@ class CVATSSearchApp:
             border=ft.border.all(2, ft.Colors.OUTLINE), 
             border_radius=8, 
             bgcolor="#F9E79F", 
-            height=120,
+            height=120,  # Fixed height
             content=ft.Column([
                 ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
                 ft.Text(f"of {len(self.search_results)} results", size=16)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
             expand=True
         )
 
@@ -761,11 +1029,11 @@ class CVATSSearchApp:
             border=ft.border.all(2, ft.Colors.OUTLINE), 
             border_radius=8, 
             bgcolor="#A9DFBF", 
-            height=120,
+            height=120, 
             content=ft.Column([
                 ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
                 ft.Text(decrypted_dob, size=16, weight=ft.FontWeight.BOLD)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
             expand=True
         )
         
