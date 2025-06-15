@@ -47,9 +47,8 @@ class CVATSSearchApp:
         self.db_config = {
             'host': 'localhost',
             'user': 'root',
-            'password': 'Azkarayan',
-            'database': 'ats_pengangguran2',
-            'port': 3307
+            'password': '',
+            'database': 'ats_pengangguran2'
         }
         self.secret_key = "RAHASIA"
         self.loading_indicator_db = ft.ProgressRing(width=50, height=50)
@@ -179,8 +178,7 @@ class CVATSSearchApp:
         current_applicant_exact_matches = {}
         current_applicant_total_exact_match = 0
         if algo_choice == "Aho-Corasick":
-            # Menggunakan trie yang sudah dibangun
-            all_matches = aho_corasic(aho_corasick_trie_data, flat_text) # Memanggil fungsi search baru
+            all_matches = aho_corasic(aho_corasick_trie_data, flat_text)
             for i, keyword in enumerate(keyword_list):
                 if all_matches[i] > 0:
                     current_applicant_exact_matches[keyword] = current_applicant_exact_matches.get(keyword, 0) + all_matches[i]
@@ -654,7 +652,7 @@ class CVATSSearchApp:
             content=ft.Column([
                 ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
                 ft.Text(f"of {len(self.search_results)} results", size=16)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
             expand=True
         )
 
