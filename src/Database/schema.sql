@@ -1,5 +1,5 @@
 CREATE DATABASE IF NOT EXISTS ats_pengangguran1;
-USE ats_pengangguran2;
+USE ats_pengangguran1;
 
 CREATE TABLE IF NOT EXISTS ApplicantProfile (
     applicant_id INT PRIMARY KEY NOT NULL,
