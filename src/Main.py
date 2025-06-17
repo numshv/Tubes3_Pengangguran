@@ -48,9 +48,8 @@ class CVATSSearchApp:
         self.db_config = {
             'host': 'localhost',
             'user': 'root',
-            'password': 'Azkarayan',
-            'database': 'pengangguran2',
-            'port': 3307
+            'password': 'n0um1sy1fa',
+            'database': 'pengangguran2'
         }
         self.secret_key = "RAHASIA"
 
@@ -291,7 +290,7 @@ class CVATSSearchApp:
         current_applicant_exact_matches = {}
         current_applicant_total_exact_match = 0
         if algo_choice == "Aho-Corasick":
-            all_matches = aho_corasic(aho_corasick_trie_data, flat_text)
+            all_matches = aho_corasick(aho_corasick_trie_data, flat_text)
             for i, keyword in enumerate(keyword_list):
                 if all_matches[i] > 0:
                     current_applicant_exact_matches[keyword] = current_applicant_exact_matches.get(keyword, 0) + all_matches[i]
@@ -343,7 +342,7 @@ class CVATSSearchApp:
         try:
             connection = mysql.connector.connect(**self.db_config)
             cursor = connection.cursor(dictionary=True)
-            query = "SELECT p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number, d.application_role, d.cv_path FROM ApplicantProfile p JOIN ApplicantDetail d ON p.applicant_id = d.applicant_id"
+            query = "SELECT p.applicant_id, p.first_name, p.last_name, p.date_of_birth, p.address, p.phone_number, d.application_role, d.cv_path FROM ApplicantProfile p JOIN ApplicationDetail d ON p.applicant_id = d.applicant_id"
             cursor.execute(query)
             all_applicants = cursor.fetchall()
             num_total_applicants = len(all_applicants)
@@ -1020,7 +1019,7 @@ class CVATSSearchApp:
             content=ft.Column([
                 ft.Text(f"#{self.search_results.index(candidate) + 1:02}", size=36, weight=ft.FontWeight.BOLD), 
                 ft.Text(f"of {len(self.search_results)} results", size=16)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER), # Corrected: Removed main_axis_alignment
             expand=True
         )
 
@@ -1033,13 +1032,13 @@ class CVATSSearchApp:
             content=ft.Column([
                 ft.Text("Birth Date", size=18, weight=ft.FontWeight.BOLD), 
                 ft.Text(decrypted_dob, size=16, weight=ft.FontWeight.BOLD)
-            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, run_alignment=ft.MainAxisAlignment.CENTER),
+            ], horizontal_alignment=ft.CrossAxisAlignment.CENTER), # Corrected: Removed main_axis_alignment
             expand=True
         )
         
         skills_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, content=ft.Column([ft.Text("Skills", size=24, weight=ft.FontWeight.BOLD), ft.Column([ft.Text(skills_text or "No skills section found.", size=16)], expand=True, scroll=ft.ScrollMode.ADAPTIVE)]), expand=True)
-        job_history_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#E8DAEF", expand=True, content=ft.Column([ft.Text("Job History", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {job['title']}", weight=ft.FontWeight.BOLD), ft.Text(job['period'], size=12, italic=True), ft.Text(job['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for job in job_history_list] if job_history_list else [ft.Text("No job history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
-        education_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#D4E6F1", expand=True, content=ft.Column([ft.Text("Education", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {edu['title']}", weight=ft.FontWeight.BOLD), ft.Text(edu['period'], size=12, italic=True), ft.Text(edu['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for edu in education_list] if education_list else [ft.Text("No education history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        job_history_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#E8DAEF", expand=True, content=ft.Column(controls=[ft.Text("Job History", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {job['title']}", weight=ft.FontWeight.BOLD), ft.Text(job['period'], size=12, italic=True), ft.Text(job['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for job in job_history_list] if job_history_list else [ft.Text("No job history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
+        education_card = ft.Container(padding=20, border=ft.border.all(2, ft.Colors.OUTLINE), border_radius=8, bgcolor="#D4E6F1", expand=True, content=ft.Column(controls=[ft.Text("Education", size=24, weight=ft.FontWeight.BOLD), ft.Column(controls=[ft.Column([ft.Text(f"● {edu['title']}", weight=ft.FontWeight.BOLD), ft.Text(edu['period'], size=12, italic=True), ft.Text(edu['desc'], size=14, selectable=True)], spacing=2, alignment=ft.MainAxisAlignment.START) for edu in education_list] if education_list else [ft.Text("No education history found.")], spacing=15, scroll=ft.ScrollMode.ADAPTIVE, expand=True)]))
         back_button = ft.Container(content=ft.Row([ft.Icon(ft.Icons.ARROW_BACK, color='white'), ft.Text("Back to Results", color='white', size=18, weight=ft.FontWeight.BOLD)], alignment=ft.MainAxisAlignment.CENTER), bgcolor='black', padding=15, border_radius=8, on_click=self.show_main_view, tooltip="Go back to results")
         
         summary_layout = ft.Column([
